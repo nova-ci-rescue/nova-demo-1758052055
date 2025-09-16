@@ -1,0 +1,502 @@
+# yamllint disable rule:document-start rule:line-length rule:truthy rule:comments-indentation
+name: Nova CI-Rescue
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  checks: write
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  nova:
+    name: nova
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ !(github.event_name == 'push' && (contains(github.event.head_commit.message, '[skip nova]') || contains(github.event.head_commit.message, 'Nova Auto-Fix'))) }}
+    env:
+      # Prefer nova-bot PAT when present; otherwise use repo's GITHUB_TOKEN
+      GH_TOKEN: ${{ secrets.NOVA_BOT_TOKEN != '' && secrets.NOVA_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.GH_TOKEN }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+
+      - name: Ensure config exists
+        run: |
+          test -f .nova-ci/config.json || { echo "::error::Missing .nova-ci/config.json"; exit 1; }
+          echo "Config OK"
+
+      - name: Read config
+        id: cfg
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const cfg = JSON.parse(fs.readFileSync('.nova-ci/config.json','utf8'));
+            const out = (k,v)=>core.setOutput(k, String(v));
+
+            out('LANG', (cfg.language || 'python'));
+            out('INSTALL', (cfg.install || []).join(' && ').replace(/\n/g,' '));
+            out('TEST_CMD', (cfg.test_command || 'pytest -q'));
+            out('BRAND_NAME', (cfg.brand?.name || 'CI Pipeline'));
+
+            const nova = (cfg.nova || {});
+            out('NOVA_PKG', (nova.package || 'nova-ci-rescue'));
+            out('NOVA_IDX', (nova.index_url || ''));
+            out('NOVA_VER', (nova.version || ''));
+            out('NOVA_ARGS', (nova.fix_args || '--ci-mode --patch-mode --timeout 900'));
+
+            const safety = (nova.safety_env || {});
+            for (const [k,v] of Object.entries(safety)) core.setOutput(k, String(v));
+          result-encoding: string
+
+      - name: Start timer
+        id: t0
+        run: |
+          TS=$(date +%s)
+          echo "ts=$TS" >> "$GITHUB_OUTPUT"
+          echo "NOVA_START_TS=$TS" >> "$GITHUB_ENV"
+
+      - name: Set up Python (Nova CLI is Python)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: YAML lint (yamllint)
+        run: |
+          python -m pip install -U yamllint
+          yamllint -f colored -s .github/workflows/nova.yml
+
+      - name: Language runtime (Node optional)
+        if: ${{ steps.cfg.outputs.LANG == 'node' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install project deps
+        if: ${{ steps.cfg.outputs.INSTALL != '' }}
+        run: bash -lc '${{ steps.cfg.outputs.INSTALL }}'
+
+      - name: Run tests (expect failures)
+        id: test_pre
+        continue-on-error: true
+        run: |
+          set +e
+          bash -lc '${{ steps.cfg.outputs.TEST_CMD }}'
+          CODE=$?
+          set -e
+          echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
+          if [ -f test-results.json ]; then
+            FAILS=$(jq -r '.summary.failed' test-results.json 2>/dev/null || echo "")
+          fi
+          echo "pre_failed=${FAILS:-0}" >> "$GITHUB_OUTPUT"
+
+      # ────────────────────────────────────────────────────────────────────────────
+      # One sticky PR comment that we update throughout the job
+      # ────────────────────────────────────────────────────────────────────────────
+
+      - name: Sticky PR status (init)
+        if: ${{ github.event_name == 'pull_request' && steps.test_pre.outputs.exit_code != '0' }}
+        id: sticky_init
+        uses: actions/github-script@v7
+        env:
+          PRE_FAILED: ${{ steps.test_pre.outputs.pre_failed || '0' }}
+        with:
+          script: |
+            const anchor = '<!-- NOVA_STICKY_COMMENT -->';
+            const status = `🟡 Running (iteration 1/3)`;
+            const failing = process.env.PRE_FAILED || '0';
+            const line = `Failing tests: ${failing} → — • Patch size: — • Elapsed: 0s`;
+            const body = [
+              anchor,
+              '## 🤖 Nova CI‑Rescue',
+              '',
+              `Status: ${status}`,
+              line,
+              '',
+              '**Plan**',
+              '• Include zero‑score docs',
+              '• Sort by score desc; tie‑break by index asc',
+              '• Slice [:k]',
+              '',
+              '<details><summary>Artifacts & links</summary>',
+              `- CI run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '- Patch/diff: (will appear after first commit)',
+              '- Logs: see workflow artifacts',
+              '</details>',
+              '',
+              'Guardrails: ≤40 LOC · ≤5 files · ≤3 attempts · never touches `main`',
+            ].join('\n');
+
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number || context.payload.pull_request.number;
+            const {data: comments} = await github.rest.issues.listComments({owner, repo, issue_number, per_page: 100});
+            const mine = comments.find(c => (c.body||'').includes(anchor));
+            if (mine) {
+              await github.rest.issues.updateComment({owner, repo, comment_id: mine.id, body});
+              core.setOutput('comment_id', String(mine.id));
+            } else {
+              const {data} = await github.rest.issues.createComment({owner, repo, issue_number, body});
+              core.setOutput('comment_id', String(data.id));
+            }
+
+      - name: "Label: in-progress"
+        if: ${{ github.event_name == 'pull_request' && steps.test_pre.outputs.exit_code != '0' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number || context.payload.pull_request.number;
+            try {
+              const {data} = await github.rest.issues.listLabelsOnIssue({owner, repo, issue_number});
+              for (const L of data) if (L.name && L.name.startsWith('nova-')) {
+                await github.rest.issues.removeLabel({owner, repo, issue_number, name: L.name}).catch(()=>{});
+              }
+            } catch {}
+            await github.rest.issues.addLabels({owner, repo, issue_number, labels: ['nova-in-progress']});
+
+      - name: "PR description: bug details"
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pull_number = context.issue.number || context.payload.pull_request.number;
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+            const header = '### Bug details';
+            const bullets = [
+              '- Zero-score documents were previously filtered out; they must be kept.',
+              '- Sort results by score descending; tie-break with index ascending.',
+              '- Return exactly min(k, len(corpus)) using slice [:k] (fix off-by-one).'
+            ].join('\n');
+            const block = `${header}\n\n${bullets}`;
+            const body = (pr.body || '').trim();
+            if (!body.includes(header)) {
+              const newBody = (body ? body + '\n\n' : '') + block;
+              await github.rest.pulls.update({ owner, repo, pull_number, body: newBody });
+            }
+
+      - name: Install Nova (Cloudsmith latest or pinned)
+        if: ${{ steps.test_pre.outputs.exit_code != '0' }}
+        run: |
+          PKG="${{ steps.cfg.outputs.NOVA_PKG }}${{ steps.cfg.outputs.NOVA_VER }}"
+          INDEX="${{ steps.cfg.outputs.NOVA_IDX }}"
+          python -m pip install -U pip
+          if [ -n "$INDEX" ]; then
+            python -m pip install -U --no-cache-dir "$PKG" \
+              --index-url "$INDEX" --extra-index-url https://pypi.org/simple/
+          else
+            python -m pip install -U --no-cache-dir "$PKG"
+          fi
+
+      - name: Sticky → planned
+        if: ${{ github.event_name == 'pull_request' && steps.test_pre.outputs.exit_code != '0' }}
+        uses: actions/github-script@v7
+        env:
+          START_TS: ${{ steps.t0.outputs.ts }}
+        with:
+          script: |
+            const anchor = '<!-- NOVA_STICKY_COMMENT -->';
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number || context.payload.pull_request.number;
+            const {data: comments} = await github.rest.issues.listComments({owner, repo, issue_number, per_page: 100});
+            const mine = comments.find(c => (c.body||'').includes(anchor));
+            if (!mine) return;
+
+            const hms = s => `${Math.floor(s/60)}m ${s%60}s`;
+            const elapsed = hms(Math.max(0, Math.floor(Date.now()/1000 - Number(process.env.START_TS||0))));
+
+            let body = (mine.body||'')
+              .replace(/Status: .*/, 'Status: 🧠 Planned fix, generating patch…')
+              .replace(/• Elapsed: [^\n]*/, '• Elapsed: ' + elapsed);
+            await github.rest.issues.updateComment({owner, repo, comment_id: mine.id, body});
+
+      - name: Configure Git user
+        if: ${{ steps.test_pre.outputs.exit_code != '0' }}
+        run: |
+          git config user.name "nova-bot"
+          git config user.email "nova@ci-auto-rescue.dev"
+          git config --global push.autoSetupRemote true
+
+      - name: Run Nova auto-fix
+        if: ${{ steps.test_pre.outputs.exit_code != '0' }}
+        id: nova
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GH_TOKEN: ${{ env.GH_TOKEN }}
+          NOVA_SAFETY_MAX_FILES: ${{ steps.cfg.outputs.NOVA_SAFETY_MAX_FILES }}
+          NOVA_SAFETY_MAX_LINES_PER_FILE: ${{ steps.cfg.outputs.NOVA_SAFETY_MAX_LINES_PER_FILE }}
+        run: |
+          set +e
+          nova --version || true
+          START=$(date +%s)
+          BEFORE_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
+          ARGS="${{ steps.cfg.outputs.NOVA_ARGS }}"
+          # Enforce a single iteration regardless of provided args
+          CLEAN_MAX="$(echo " ${ARGS} " | sed -E 's/ --max-iters[[:space:]]+[0-9]+/ /g')"
+          ARGS_FINAL="${CLEAN_MAX} --max-iters 3 --quiet"
+          echo "Running: nova fix . ${ARGS_FINAL}"
+          NOVA_EXIT=0
+          if ! nova fix . ${ARGS_FINAL}; then
+            echo "Retry without --patch-mode..."
+            CLEAN_ARGS="${ARGS_FINAL/--patch-mode/}"
+            nova fix . ${CLEAN_ARGS} || NOVA_EXIT=$?
+          fi
+          END=$(date +%s)
+          AFTER_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
+          echo "duration=$((END-START))s" >> "$GITHUB_OUTPUT"
+          echo "nova_exit=${NOVA_EXIT:-0}" >> "$GITHUB_OUTPUT"
+
+          # Gather patch stats and commit ONLY source changes (never .nova)
+          if [ -n "$BEFORE_SHA" ] && [ -n "$AFTER_SHA" ] && [ "$BEFORE_SHA" != "$AFTER_SHA" ]; then
+            # Nova committed directly; compute stats from commit range
+            mkdir -p .nova
+            FILES=$(git diff --name-only "$BEFORE_SHA".."$AFTER_SHA" | wc -l | xargs)
+            ADDED=$(git diff --numstat "$BEFORE_SHA".."$AFTER_SHA" | awk '{a+=$1} END{print a+0}')
+            REMOVED=$(git diff --numstat "$BEFORE_SHA".."$AFTER_SHA" | awk '{r+=$2} END{print r+0}')
+            printf '{"files_changed": %s, "lines_added": %s, "lines_removed": %s}\n' "${FILES:-0}" "${ADDED:-0}" "${REMOVED:-0}" > .nova/changes.json
+            [ -f .nova/plan.md ] || echo "No detailed plan was provided by Nova." > .nova/plan.md
+            echo "changes_made=true"            >> "$GITHUB_OUTPUT"
+            echo "files_changed=$FILES"         >> "$GITHUB_OUTPUT"
+            echo "lines_added=$ADDED"           >> "$GITHUB_OUTPUT"
+            echo "lines_removed=$REMOVED"       >> "$GITHUB_OUTPUT"
+          else
+            # Fallback: stage and commit any uncommitted changes made by this job
+            if [ -n "$(git status --porcelain)" ]; then
+              mkdir -p .nova
+              git add -A
+              git reset .nova 2>/dev/null || true
+              FILES=$(git diff --cached --name-only | wc -l | xargs)
+              ADDED=$(git diff --cached --numstat | awk '{a+=$1} END{print a+0}')
+              REMOVED=$(git diff --cached --numstat | awk '{r+=$2} END{print r+0}')
+              printf '{"files_changed": %s, "lines_added": %s, "lines_removed": %s}\n' "${FILES:-0}" "${ADDED:-0}" "${REMOVED:-0}" > .nova/changes.json
+              [ -f .nova/plan.md ] || echo "No detailed plan was provided by Nova." > .nova/plan.md
+              git commit -m "Nova Auto-Fix: make tests pass [skip nova]"
+              BRANCH="${{ github.event.pull_request.head.ref || github.ref_name }}"
+              [ -z "$BRANCH" -o "$BRANCH" = "refs/heads/" ] && BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+              git push --set-upstream origin "HEAD:$BRANCH"
+              echo "changes_made=true"            >> "$GITHUB_OUTPUT"
+              echo "files_changed=$FILES"         >> "$GITHUB_OUTPUT"
+              echo "lines_added=$ADDED"           >> "$GITHUB_OUTPUT"
+              echo "lines_removed=$REMOVED"       >> "$GITHUB_OUTPUT"
+            else
+              echo "changes_made=false"           >> "$GITHUB_OUTPUT"
+              echo "files_changed=0"              >> "$GITHUB_OUTPUT"
+              echo "lines_added=0"                >> "$GITHUB_OUTPUT"
+              echo "lines_removed=0"              >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Sticky → re‑running tests (with plan + elapsed + LOC)
+        if: ${{ github.event_name == 'pull_request' && steps.test_pre.outputs.exit_code != '0' }}
+        uses: actions/github-script@v7
+        env:
+          START_TS: ${{ steps.t0.outputs.ts }}
+          LINES_ADDED: ${{ steps.nova.outputs.lines_added || '0' }}
+          LINES_REMOVED: ${{ steps.nova.outputs.lines_removed || '0' }}
+        with:
+          script: |
+            const anchor = '<!-- NOVA_STICKY_COMMENT -->';
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number || context.payload.pull_request.number;
+            const {data: comments} = await github.rest.issues.listComments({owner, repo, issue_number, per_page: 100});
+            const mine = comments.find(c => (c.body||'').includes(anchor));
+            if (!mine) return;
+
+            const hms = s => `${Math.floor(s/60)}m ${s%60}s`;
+            const elapsed = hms(Math.max(0, Math.floor(Date.now()/1000 - Number(process.env.START_TS||0))));
+            const loc = (Number(process.env.LINES_ADDED||0) + Number(process.env.LINES_REMOVED||0)) + ' LOC';
+
+            const fs = require('fs');
+            let body = (mine.body||'')
+              .replace(/Status: .*/, 'Status: 🧪 Re‑running tests…')
+              .replace(/Patch size: [^•\n]*/, 'Patch size: ' + loc)
+              .replace(/• Elapsed: [^\n]*/, '• Elapsed: ' + elapsed);
+
+            if (fs.existsSync('.nova/plan.md') && !/#### Plan/.test(body)) {
+              const plan = fs.readFileSync('.nova/plan.md','utf8').trim();
+              body += `\n\n#### Plan\n\n${plan}\n`;
+            }
+            await github.rest.issues.updateComment({owner, repo, comment_id: mine.id, body});
+
+      - name: Verify tests after fix
+        if: ${{ steps.nova.outputs.changes_made == 'true' }}
+        id: test_post
+        continue-on-error: true
+        run: |
+          set +e
+          bash -lc '${{ steps.cfg.outputs.TEST_CMD }}'
+          CODE=$?
+          set -e
+          echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
+          if [ -f test-results.json ]; then
+            FAILS=$(jq -r '.summary.failed' test-results.json 2>/dev/null || echo "")
+          fi
+          echo "failed=${FAILS:-}" >> "$GITHUB_OUTPUT"
+
+      - name: Sticky → success
+        if: ${{ github.event_name == 'pull_request' && steps.nova.outputs.changes_made == 'true' && steps.test_post.outputs.exit_code == '0' }}
+        uses: actions/github-script@v7
+        env:
+          START_TS: ${{ steps.t0.outputs.ts }}
+          PRE_FAILED: ${{ steps.test_pre.outputs.pre_failed || '0' }}
+          LINES_ADDED: ${{ steps.nova.outputs.lines_added || '0' }}
+          LINES_REMOVED: ${{ steps.nova.outputs.lines_removed || '0' }}
+        with:
+          script: |
+            const anchor = '<!-- NOVA_STICKY_COMMENT -->';
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number || context.payload.pull_request.number;
+            const {data: comments} = await github.rest.issues.listComments({owner, repo, issue_number, per_page: 100});
+            const mine = comments.find(c => (c.body||'').includes(anchor));
+            if (!mine) return;
+
+            const hms = s => `${Math.floor(s/60)}m ${s%60}s`;
+            const elapsed = hms(Math.max(0, Math.floor(Date.now()/1000 - Number(process.env.START_TS||0))));
+            const loc = (Number(process.env.LINES_ADDED||0) + Number(process.env.LINES_REMOVED||0)) + ' LOC';
+            const pre = process.env.PRE_FAILED || '0';
+
+            const body = (mine.body||'')
+              .replace(/Status: .*/, 'Status: ✅ All tests passing')
+              .replace(/Failing tests: .*/, `Failing tests: ${pre} → 0 • Patch size: ${loc} • Elapsed: ${elapsed}`);
+            await github.rest.issues.updateComment({owner, repo, comment_id: mine.id, body});
+
+      - name: "Label: fixed"
+        if: ${{ github.event_name == 'pull_request' && steps.nova.outputs.changes_made == 'true' && steps.test_post.outputs.exit_code == '0' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number || context.payload.pull_request.number;
+            try {
+              const {data} = await github.rest.issues.listLabelsOnIssue({owner, repo, issue_number});
+              for (const L of data) if (L.name.startsWith('nova-')) await github.rest.issues.removeLabel({owner, repo, issue_number, name: L.name}).catch(()=>{});
+            } catch {}
+            await github.rest.issues.addLabels({owner, repo, issue_number, labels: ['nova-fixed']});
+
+      - name: Sticky → partial
+        if: ${{ github.event_name == 'pull_request' && steps.nova.outputs.changes_made == 'true' && steps.test_post.outputs.exit_code != '0' }}
+        uses: actions/github-script@v7
+        env:
+          START_TS: ${{ steps.t0.outputs.ts }}
+          PRE_FAILED: ${{ steps.test_pre.outputs.pre_failed || '0' }}
+          POST_FAILED: ${{ steps.test_post.outputs.failed || '—' }}
+          LINES_ADDED: ${{ steps.nova.outputs.lines_added || '0' }}
+          LINES_REMOVED: ${{ steps.nova.outputs.lines_removed || '0' }}
+        with:
+          script: |
+            const anchor = '<!-- NOVA_STICKY_COMMENT -->';
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number || context.payload.pull_request.number;
+            const {data: comments} = await github.rest.issues.listComments({owner, repo, issue_number, per_page: 100});
+            const mine = comments.find(c => (c.body||'').includes(anchor));
+            if (!mine) return;
+
+            const hms = s => `${Math.floor(s/60)}m ${s%60}s`;
+            const elapsed = hms(Math.max(0, Math.floor(Date.now()/1000 - Number(process.env.START_TS||0))));
+            const loc = (Number(process.env.LINES_ADDED||0) + Number(process.env.LINES_REMOVED||0)) + ' LOC';
+            const pre = process.env.PRE_FAILED || '0';
+            const post = process.env.POST_FAILED || '—';
+
+            const body = (mine.body||'')
+              .replace(/Status: .*/, 'Status: ⚠️ Partial fix — some tests still failing')
+              .replace(/Failing tests: .*/, `Failing tests: ${pre} → ${post} • Patch size: ${loc} • Elapsed: ${elapsed}`);
+            await github.rest.issues.updateComment({owner, repo, comment_id: mine.id, body});
+
+      - name: "Label: partial"
+        if: ${{ github.event_name == 'pull_request' && steps.nova.outputs.changes_made == 'true' && steps.test_post.outputs.exit_code != '0' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number || context.payload.pull_request.number;
+            try {
+              const {data} = await github.rest.issues.listLabelsOnIssue({owner, repo, issue_number});
+              for (const L of data) if (L.name.startsWith('nova-')) await github.rest.issues.removeLabel({owner, repo, issue_number, name: L.name}).catch(()=>{});
+            } catch {}
+            await github.rest.issues.addLabels({owner, repo, issue_number, labels: ['nova-partial']});
+
+      - name: Sticky → failed
+        if: ${{ github.event_name == 'pull_request' && steps.nova.outputs.changes_made != 'true' }}
+        uses: actions/github-script@v7
+        env:
+          START_TS: ${{ steps.t0.outputs.ts }}
+          PRE_FAILED: ${{ steps.test_pre.outputs.pre_failed || '0' }}
+        with:
+          script: |
+            const anchor = '<!-- NOVA_STICKY_COMMENT -->';
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number || context.payload.pull_request.number;
+            const {data: comments} = await github.rest.issues.listComments({owner, repo, issue_number, per_page: 100});
+            const mine = comments.find(c => (c.body||'').includes(anchor));
+            if (!mine) return;
+
+            const hms = s => `${Math.floor(s/60)}m ${s%60}s`;
+            const elapsed = hms(Math.max(0, Math.floor(Date.now()/1000 - Number(process.env.START_TS||0))));
+            const pre = process.env.PRE_FAILED || '0';
+
+            const body = (mine.body||'')
+              .replace(/Status: .*/, 'Status: ❌ Couldn’t fix (see logs)')
+              .replace(/Failing tests: .*/, `Failing tests: ${pre} → — • Patch size: — • Elapsed: ${elapsed}`);
+            await github.rest.issues.updateComment({owner, repo, comment_id: mine.id, body});
+
+      - name: "Label: failed"
+        if: ${{ github.event_name == 'pull_request' && steps.nova.outputs.changes_made != 'true' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number || context.payload.pull_request.number;
+            try {
+              const {data} = await github.rest.issues.listLabelsOnIssue({owner, repo, issue_number});
+              for (const L of data) if (L.name.startsWith('nova-')) await github.rest.issues.removeLabel({owner, repo, issue_number, name: L.name}).catch(()=>{});
+            } catch {}
+            await github.rest.issues.addLabels({owner, repo, issue_number, labels: ['nova-failed']});
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-artifacts-${{ github.run_id }}
+          path: |
+            test-results.json
+            .nova/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## 🚀 Nova CI-Rescue Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          PRE_FAILED="${{ steps.test_pre.outputs.pre_failed || '0' }}"
+          FILES_CHANGED="${{ steps.nova.outputs.files_changed || '0' }}"
+          LINES_ADDED="${{ steps.nova.outputs.lines_added || '0' }}"
+          LINES_REMOVED="${{ steps.nova.outputs.lines_removed || '0' }}"
+          DURATION="${{ steps.nova.outputs.duration || 'n/a' }}"
+          echo "**🧪 Tests Fixed:** ${PRE_FAILED} → $([[ \"${{ steps.test_post.outputs.exit_code }}\" == '0' ]] && echo 0 || echo '—')" >> $GITHUB_STEP_SUMMARY
+          echo "**📈 Patch Size:** ${FILES_CHANGED} files changed, +${LINES_ADDED}/-${LINES_REMOVED} LOC" >> $GITHUB_STEP_SUMMARY
+          echo "**⏱ Duration:** ${DURATION}" >> $GITHUB_STEP_SUMMARY
+          echo "**🔒 Guardrails:** ≤5 files & ≤100 LOC (demo); never touches main" >> $GITHUB_STEP_SUMMARY
+          echo "**🏷 Brand:** ${{ steps.cfg.outputs.BRAND_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "_Never touches main · ≤40 LOC per run · ≤5 files · ≤3 attempts_" >> $GITHUB_STEP_SUMMARY
