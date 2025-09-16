@@ -4,6 +4,13 @@
 
 set -Eeuo pipefail
 
+# Mirror output to /dev/tty when stdout is captured so users still
+# see progress in real time.
+if [ ! -t 1 ] && [ -e /dev/tty ] && [ -w /dev/tty ]; then
+    exec > >(tee /dev/tty)
+    exec 2> >(tee /dev/tty >&2)
+fi
+
 # Use existing GitHub CLI authentication
 # Don't override authenticated session
 
@@ -36,7 +43,7 @@ for arg in "$@"; do
             echo ""
             echo "Options:"
             echo "  --repo=<name>        Name for the demo repo (default: nova-quickstart-<ts>)"
-            echo "  --org=<org|user>     Owner (GitHub org or user). Default: joinnova-ci"
+            echo "  --org=<org|user>     Owner (GitHub org or user). Default: your authenticated user"
             echo "  --public             Create as public repo (default: private)"
             echo "  -y, --yes            Non-interactive mode"
             echo "  -v, --verbose        Show detailed output"
@@ -50,6 +57,11 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Reuse entitlement token provided via legacy env vars.
+if [ -z "${CLOUDSMITH_ENTITLEMENT:-}" ] && [ -n "${CLOUDSMITH_TOKEN:-}" ]; then
+    CLOUDSMITH_ENTITLEMENT="$CLOUDSMITH_TOKEN"
+fi
 
 ########################################
 # Terminal Intelligence & Visuals
@@ -123,6 +135,33 @@ main() {
         exit 1
     fi
 
+    local viewer_info viewer_status viewer_login viewer_can_create
+    set +e
+    viewer_info=$(gh api graphql \
+        -f query='query { viewer { login } viewerCanCreateRepositories }' \
+        --template '{{.data.viewer.login}} {{.data.viewerCanCreateRepositories}}' 2>&1)
+    viewer_status=$?
+    set -e
+
+    if [ $viewer_status -ne 0 ]; then
+        err "GitHub CLI authenticated but cannot verify repository permissions."
+        echo "$viewer_info"
+        echo "Fix: re-run 'gh auth login' (or 'gh auth refresh -s repo,workflow')."
+        return 1
+    fi
+
+    read -r VIEWER_LOGIN VIEWER_CAN_CREATE <<<"$viewer_info"
+    if [ -z "$VIEWER_LOGIN" ] || [ -z "$VIEWER_CAN_CREATE" ]; then
+        err "Unable to determine GitHub account capabilities. Please re-authenticate with 'gh auth login'."
+        return 1
+    fi
+
+    if [ "$VIEWER_CAN_CREATE" != "true" ]; then
+        err "Account '$VIEWER_LOGIN' cannot create repositories via the GitHub API."
+        echo "Grant the token 'repo' scope or authenticate as a user/org owner that can create repositories, then rerun the demo (or choose the Local demo instead)."
+        return 1
+    fi
+
     # Repo root and workflow templates
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     # Prefer vendored workflow under quickstart/.github/workflows (this file lives in quickstart/scripts)
@@ -135,8 +174,10 @@ main() {
         exit 1
     fi
 
-    # Determine owner - use joinnova-ci organization by default
-    if [ -z "$ORG_OR_USER" ]; then ORG_OR_USER="joinnova-ci"; fi
+    # Determine owner - default to the authenticated user unless overridden
+    if [ -z "$ORG_OR_USER" ]; then
+        ORG_OR_USER="${NOVA_DEFAULT_GITHUB_OWNER:-$VIEWER_LOGIN}"
+    fi
 
     # Repo name
     if [ -z "$REPO_NAME" ]; then REPO_NAME="nova-quickstart-$(date +%Y%m%d-%H%M%S)"; fi
@@ -164,12 +205,12 @@ main() {
     python3 -m pip install --quiet --upgrade pip
     # Prefer PyPI; fall back to Cloudsmith if entitlement is provided via env
     INSTALL_OK=0
-    ENT="${CLOUDSMITH_ENTITLEMENT:-${CLOUDSMITH_TOKEN:-}}"
+    CLOUDSMITH_SOURCE="${CLOUDSMITH_ENTITLEMENT:-${CLOUDSMITH_TOKEN:-${OPENAI_ENTITLEMENT_TOKEN:-${NOVA_CLOUDSMITH_TOKEN:-}}}}"
     set +e
     python3 -m pip install --quiet --no-cache-dir nova-ci-rescue 2>&1 | grep -v "Requirement already satisfied"
     INSTALL_OK=$?
-    if [ $INSTALL_OK -ne 0 ] && [ -n "$ENT" ]; then
-        INDEX_URL="https://dl.cloudsmith.io/${ENT}/nova/nova-ci-rescue/python/simple/"
+    if [ $INSTALL_OK -ne 0 ] && [ -n "$CLOUDSMITH_SOURCE" ]; then
+        INDEX_URL="https://dl.cloudsmith.io/${CLOUDSMITH_SOURCE}/nova/nova-ci-rescue/python/simple/"
         python3 -m pip install --quiet --no-cache-dir nova-ci-rescue \
             --index-url "$INDEX_URL" \
             --extra-index-url "https://pypi.org/simple" \
@@ -491,12 +532,13 @@ EOF
     else
         info "Creating new repo: $FULL_NAME"
         # Create repo WITHOUT --push flag to avoid remote conflicts
-        gh repo create "$FULL_NAME" $VISIBILITY || {
+        if ! gh repo create "$FULL_NAME" $VISIBILITY --confirm >/tmp/nova_repo_create.log 2>&1; then
             err "Failed to create GitHub repo. Check permissions and try again."
-            echo "  - Make sure you have permissions to create repos in joinnova-ci org"
-            echo "  - Try: gh auth status"
-            exit 1
-        }
+            cat /tmp/nova_repo_create.log
+            echo "  - Confirm your token has repo scope and that $ORG_OR_USER can create repositories"
+            echo "  - Run: gh auth login"
+            return 1
+        fi
         
         # Disable repository rules to prevent push blocking
         gh api repos/$FULL_NAME --method PATCH \
