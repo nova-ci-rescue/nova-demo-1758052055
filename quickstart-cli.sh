@@ -123,6 +123,7 @@ USE_EXISTING_REPO=""
 GITHUB_TOKEN_SCOPES=""
 GITHUB_IDENTITY=""
 GITHUB_PREREQ_REASON=""
+CAN_CREATE_REPOS="unknown"
 NOVA_WATCH_TIMEOUT="${NOVA_WATCH_TIMEOUT:-300}"
 
 have_cmd() {
@@ -166,6 +167,141 @@ scopes_contain() {
   esac
 }
 
+extract_repo_slug_from_remote() {
+  local url="$1"
+  url="${url%.git}"
+  url="${url#https://github.com/}"
+  url="${url#git@github.com:}"
+  echo "$url"
+}
+
+ensure_branch_remote_ready() {
+  if git remote get-url origin >/dev/null 2>&1; then
+    local slug="$(extract_repo_slug_from_remote "$(git remote get-url origin)")"
+    if [[ "$slug" == */* ]]; then
+      REPO_FULL_NAME="$slug"
+      OWNER="${slug%/*}"
+      REPO_NAME="${slug#*/}"
+      GITHUB_USER="$OWNER"
+    fi
+  else
+    note "Remote 'origin' is not configured."
+
+    if [ -z "${USE_EXISTING_REPO:-}" ]; then
+      local default_owner="${NOVA_DEFAULT_GITHUB_OWNER:-${OWNER:-${GITHUB_IDENTITY:-}}}"
+      local temp_repo="nova-demo-$(date +%s)"
+      if [ "${CAN_CREATE_REPOS:-unknown}" = "true" ] && [ -n "$default_owner" ]; then
+        if confirm "Create GitHub repo ${default_owner}/${temp_repo} now?"; then
+          if gh repo create "${default_owner}/${temp_repo}" --public --description "Nova CI-Rescue Demo: Automatic test fixing" --disable-issues --disable-wiki --clone=false 2>/tmp/gh_create_error_branch; then
+            git remote add origin "https://github.com/${default_owner}/${temp_repo}.git"
+            REPO_FULL_NAME="${default_owner}/${temp_repo}"
+            OWNER="$default_owner"
+            REPO_NAME="$temp_repo"
+            GITHUB_USER="$default_owner"
+            ok "Created GitHub repository ${REPO_FULL_NAME}"
+          else
+            warn "Unable to create repository automatically."
+            [ -f /tmp/gh_create_error_branch ] && sed -e 's/^/  /' /tmp/gh_create_error_branch
+          fi
+        fi
+      elif [ "${CAN_CREATE_REPOS:-unknown}" != "true" ] && [ -n "$default_owner" ]; then
+        note "Skipping auto-create (insufficient permissions)."
+      fi
+    fi
+
+    if ! git remote get-url origin >/dev/null 2>&1; then
+      if confirm "Link to an existing GitHub repo (OWNER/REPO)?"; then
+        local slug=""
+        if [ -e /dev/tty ]; then
+          printf "%s" "Enter OWNER/REPO: " > /dev/tty 2>/dev/null || true
+          IFS= read -r slug < /dev/tty || slug=""
+          printf "
+" > /dev/tty 2>/dev/null || true
+        else
+          read -r -p "Enter OWNER/REPO: " slug || slug=""
+        fi
+        slug="${slug// /}"
+        if [[ "$slug" == */* ]]; then
+          git remote add origin "https://github.com/${slug}.git" 2>/tmp/git_remote_error || {
+            warn "Unable to add remote."
+            [ -f /tmp/git_remote_error ] && sed -e 's/^/  /' /tmp/git_remote_error
+          }
+          if git remote get-url origin >/dev/null 2>&1; then
+            REPO_FULL_NAME="$slug"
+            OWNER="${slug%/*}"
+            REPO_NAME="${slug#*/}"
+            GITHUB_USER="$OWNER"
+            ok "Linked to existing repository ${REPO_FULL_NAME}"
+          fi
+        else
+          warn "Invalid repository format. Expected OWNER/REPO."
+        fi
+      fi
+    fi
+  fi
+
+  if ! git remote get-url origin >/dev/null 2>&1; then
+    warn "GitHub remote still missing; cannot continue with CI demo."
+    warn "Tip: rerun with --use-existing=OWNER/REPO or add a remote manually."
+    GITHUB_PREREQ_REASON="missing_remote"
+    return 1
+  fi
+
+  if [ -z "${REPO_FULL_NAME:-}" ]; then
+    local slug="$(extract_repo_slug_from_remote "$(git remote get-url origin)")"
+    if [[ "$slug" == */* ]]; then
+      REPO_FULL_NAME="$slug"
+      OWNER="${slug%/*}"
+      REPO_NAME="${slug#*/}"
+      GITHUB_USER="$OWNER"
+    fi
+  fi
+
+  return 0
+}
+
+
+
+push_branches_and_open_pr() {
+  ensure_branch_remote_ready || return 1
+
+  if ! git show-ref --verify --quiet refs/heads/main; then
+    git branch main
+  fi
+  if ! git push -u origin main; then
+    warn "Failed to push main branch to origin."
+    return 1
+  fi
+
+  if ! git push -u origin "$BRANCH_NAME"; then
+    warn "Failed to push $BRANCH_NAME to origin."
+    return 1
+  fi
+
+  if [ -n "${OPENAI_API_KEY:-}" ]; then
+    printf '%s' "$OPENAI_API_KEY" | gh secret set OPENAI_API_KEY --repo "$REPO_FULL_NAME" >/dev/null 2>&1 || warn "Could not set OPENAI_API_KEY secret automatically."
+  fi
+  local entitlement="${CLOUDSMITH_ENTITLEMENT:-${CLOUDSMITH_TOKEN:-}}"
+  if [ -n "$entitlement" ]; then
+    printf '%s' "$entitlement" | gh secret set CLOUDSMITH_ENTITLEMENT --repo "$REPO_FULL_NAME" >/dev/null 2>&1 || warn "Could not set CLOUDSMITH_ENTITLEMENT secret automatically."
+  fi
+
+  PR_URL=$(gh pr view --repo "$REPO_FULL_NAME" --head "${OWNER}:${BRANCH_NAME}" --json url --jq .url 2>/dev/null || true)
+  if [ -z "$PR_URL" ]; then
+    PR_URL=$(gh pr create --repo "$REPO_FULL_NAME" --base main --head "$BRANCH_NAME" \
+      --title "Nova CI-Rescue Demo: Fix failing tests" \
+      --body "This PR was generated by the Nova quickstart to showcase automated CI rescue." 2>/dev/null || echo "")
+  fi
+
+  if [ -n "$PR_URL" ]; then
+    echo "✓ Pull request ready: $PR_URL"
+  else
+    warn "Could not create or view PR automatically."
+  fi
+
+  return 0
+}
+
 # --- timeout + workflow watch helpers (no external deps) ---
 
 # with_timeout <seconds> <cmd> [args...]
@@ -207,17 +343,8 @@ watch_workflow_with_timeout() {
     return 0
   fi
 
-  warn "'timeout' not found; using built-in timer (${seconds}s)… (Ctrl+C to stop)"
-  with_timeout "$seconds" gh run watch "${repo_flag[@]}" "$run_id" || true
-
-  local status conclusion
-  status="$(gh run view "${repo_flag[@]}" "$run_id" --json status --jq .status 2>/dev/null || echo "")"
-  conclusion="$(gh run view "${repo_flag[@]}" "$run_id" --json conclusion --jq .conclusion 2>/dev/null || echo "")"
-  if [ "$status" != "completed" ] || [ -z "$status" ]; then
-    warn "Stopped watching after ${seconds}s (status: ${status:-unknown}). Open the Actions link above for live logs."
-  else
-    note "Run completed (conclusion: ${conclusion:-unknown})."
-  fi
+  warn "'timeout' not found; polling workflow status for ${seconds}s."
+  poll_workflow_until "$run_id" "$seconds" "$repo"
 }
 
 poll_workflow_until() {
@@ -305,7 +432,7 @@ ask_entitlement() {
 }
 
 scrub() {
-    sed -E \
+    sed -lE \
       -e 's/(sk-[A-Za-z0-9_-]{10,})/[REDACTED_OPENAI]/g' \
       -e 's/(ghp_[A-Za-z0-9]{36})/[REDACTED_GITHUB]/g' \
       -e 's/(github_pat_[A-Za-z0-9_]{20,})/[REDACTED_GITHUB]/g' \
@@ -1390,28 +1517,27 @@ run_github_demo() {
 
     echo "Checking GitHub permissions..."
     CAN_CREATE_REPOS="unknown"
-    PERM_OUTPUT=""
-    PERM_STATUS=0
+    local can_create_output=""
+    local perm_status=0
     set +e
-    PERM_OUTPUT=$(gh api graphql \
-        -f query='query { viewer { login } viewerCanCreateRepositories }' \
-        --template '{{.data.viewer.login}} {{.data.viewerCanCreateRepositories}}' 2>&1)
-    PERM_STATUS=$?
+    can_create_output=$(gh api graphql \
+        -f query='query { viewerCanCreateRepositories }' \
+        --jq '.data.viewerCanCreateRepositories' 2>/dev/null)
+    perm_status=$?
     set -e
 
-    if [ $PERM_STATUS -eq 0 ]; then
-        read -r LOGIN CAN_CREATE <<<"$PERM_OUTPUT"
-        if [ "$CAN_CREATE" = "true" ]; then
+    if [ $perm_status -eq 0 ] && [ -n "$can_create_output" ] && [ "$can_create_output" != "null" ]; then
+        if [ "$can_create_output" = "true" ]; then
             CAN_CREATE_REPOS="true"
-            ok "GitHub permissions verified for account: $LOGIN"
+            ok "GitHub account can create repositories"
         else
             CAN_CREATE_REPOS="false"
-            warn "Account '$LOGIN' cannot create repositories"
+            warn "Current GitHub account cannot create repositories"
         fi
     else
         CAN_CREATE_REPOS="unknown"
-        warn "Cannot verify repository permissions"
-        echo "If repository creation fails, try: gh auth refresh -h github.com -s repo,workflow"
+        note "Skipping repository creation check (GitHub API response unavailable)"
+        echo "If repository creation fails, try: gh auth refresh -h github.com -s repo -s workflow"
     fi
 
     echo
@@ -1744,21 +1870,10 @@ YAML
             echo "✓ Secrets configured (OpenAI API key${CLOUDSMITH_ENTITLEMENT:+, Cloudsmith entitlement})"
             ;;
         "branch_only")
-            # Push branch and create PR
-            git push -u origin "$BRANCH_NAME"
-            echo "Setting OpenAI API key as GitHub secret..."
-            echo "$OPENAI_API_KEY" | gh secret set OPENAI_API_KEY 2>/dev/null || echo "⚠️  Could not set secret (may need repo admin access)"
-
-            # Create PR to trigger workflow
-            PR_URL=$(gh pr create --title "Nova CI-Rescue Demo: Fix failing tests" \
-                --body "This PR demonstrates Nova CI-Rescue automatically fixing failing tests in CI." \
-                --base main --head "$BRANCH_NAME" 2>/dev/null || echo "")
-
-            if [ -n "$PR_URL" ]; then
-                echo "✓ Pull request created: $PR_URL"
-                echo "✓ CI will run on the PR"
-            else
-                echo "⚠️  Could not create PR automatically. Push completed to branch: $BRANCH_NAME"
+            if ! push_branches_and_open_pr; then
+                echo "GitHub demo prerequisites not satisfied; switching to local simulation."
+                DEMO_MODE="local_only"
+                return 2
             fi
             ;;
         "local_only")
@@ -2502,6 +2617,8 @@ main() {
                                 echo "GitHub CLI is not authenticated. Run: gh auth login -w -s 'repo,workflow'" ;;
                             missing_repo_scope|missing_workflow_scope)
                                 echo "GitHub token lacks required scopes. Run: gh auth refresh -h github.com -s repo,workflow" ;;
+                            missing_remote)
+                                echo "No 'origin' remote detected. Add one (git remote add origin https://github.com/OWNER/REPO.git) or re-run with --use-existing=OWNER/REPO." ;;
                             *)
                                 echo "GitHub prerequisites missing. See logs for details." ;;
                         esac
