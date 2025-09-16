@@ -29,6 +29,8 @@ The script provisions a virtual environment, installs Nova, runs pytest, and sho
 
 Logs are scrubbed by default and saved as `/tmp/nova-quickstart-<timestamp>.log`. Use `--purge` to clean up `/tmp` afterwards if desired.
 
+For a step-by-step walkthrough, see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
+
 ## Useful flags
 | Flag | Description |
 | --- | --- |
