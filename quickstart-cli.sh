@@ -7,8 +7,6 @@
 
 set -euo pipefail
 
-SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-
 # ---------------------------------------------------------------------------------
 # TEMP: Optional hardcoded credentials for first-run convenience (LOCAL ONLY)
 # Replace the placeholder strings below with your actual keys to bypass prompts.
@@ -18,13 +16,13 @@ SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 #   DEFAULT_OPENAI_API_KEY="sk-REPLACE_ME"
 #   DEFAULT_CLOUDSMITH_ENTITLEMENT="entitlement-REPLACE_ME"
 DEFAULT_OPENAI_API_KEY="REPLACE_WITH_OPENAI_API_KEY"
-DEFAULT_CLOUDSMITH_ENTITLEMENT="uvm95DprtlQod6Cy"
+DEFAULT_CLOUDSMITH_ENTITLEMENT="REPLACE_WITH_CLOUDSMITH_ENTITLEMENT"
 
 # If env is not already set and placeholders were replaced, export and use them
 if [ -z "${OPENAI_API_KEY:-}" ] && [ "$DEFAULT_OPENAI_API_KEY" != "REPLACE_WITH_OPENAI_API_KEY" ]; then
   export OPENAI_API_KEY="$DEFAULT_OPENAI_API_KEY"
 fi
-if [ -z "${CLOUDSMITH_ENTITLEMENT:-}" ] && [ "$DEFAULT_CLOUDSMITH_ENTITLEMENT" != "REPLACE_WITH_ENTITLEMENT" ]; then
+if [ -z "${CLOUDSMITH_ENTITLEMENT:-}" ] && [ "$DEFAULT_CLOUDSMITH_ENTITLEMENT" != "REPLACE_WITH_CLOUDSMITH_ENTITLEMENT" ]; then
   export CLOUDSMITH_ENTITLEMENT="$DEFAULT_CLOUDSMITH_ENTITLEMENT"
   export CLOUDSMITH_TOKEN="${CLOUDSMITH_TOKEN:-$DEFAULT_CLOUDSMITH_ENTITLEMENT}"
   export OPENAI_ENTITLEMENT_TOKEN="${OPENAI_ENTITLEMENT_TOKEN:-$DEFAULT_CLOUDSMITH_ENTITLEMENT}"
@@ -60,104 +58,6 @@ fi
 
 # -------------------------
 # Minimal CLI UI primitives
-if [ "${NOVA_ASSUME_YES:-}" = "1" ]; then
-    ASSUME_YES=1
-else
-    ASSUME_YES=0
-fi
-FRESH_MODE=0
-RESET_KEYS=0
-PURGE_TEMP=0
-NO_KEYCHAIN_FLAG=0
-
-have_cmd() { command -v "$1" >/dev/null 2>&1; }
-
-confirm() {
-  local prompt="${1:-Are you sure?}"
-  if [ "$ASSUME_YES" = "1" ]; then
-    return 0
-  fi
-  if [ ! -t 0 ]; then
-    return 1
-  fi
-  local reply=""
-  if [ -e /dev/tty ]; then
-    printf "%s [Y/n] " "$prompt" > /dev/tty 2>/dev/null || true
-    IFS= read -r reply < /dev/tty || reply=""
-    printf "\n" > /dev/tty 2>/dev/null || true
-  else
-    read -r -p "$prompt [Y/n] " reply || reply=""
-  fi
-  [ -z "$reply" ] && return 0
-  [[ "$reply" =~ ^[Yy]$ ]]
-}
-
-reset_saved_keys() {
-  local removed=0
-  if [ -f "$HOME/.nova.env" ]; then
-    if confirm "Delete $HOME/.nova.env?"; then
-      if rm -f "$HOME/.nova.env" 2>/dev/null; then
-        echo "✓ Removed $HOME/.nova.env"
-        removed=1
-      else
-        warn "Unable to remove $HOME/.nova.env (permission denied)"
-      fi
-    fi
-  fi
-  if [ "$(uname)" = "Darwin" ] && have_cmd security; then
-    if confirm "Remove Nova OpenAI key from macOS Keychain?"; then
-      security delete-generic-password -s "Nova:OPENAI_API_KEY" >/dev/null 2>&1 || true
-      security delete-generic-password -s nova_openai_api_key >/dev/null 2>&1 || true
-      echo "✓ Removed Keychain entry"
-      removed=1
-    fi
-  fi
-  if [ "$removed" -eq 0 ]; then
-    echo "ℹ️  No stored keys were removed."
-  fi
-}
-
-purge_temp_workspaces() {
-  local tmp=${TMPDIR:-/tmp}
-  local patterns=("nova-quickstart-*" "nova-demo-*")
-  local removed=0
-  for pattern in "${patterns[@]}"; do
-    for dir in "$tmp"/$pattern; do
-      [ -e "$dir" ] || continue
-      if confirm "Remove $dir?"; then
-        rm -rf "$dir"
-        echo "✓ Removed $dir"
-        removed=1
-      fi
-    done
-  done
-  if [ "$removed" -eq 0 ]; then
-    echo "ℹ️  No existing Nova workspaces found in $tmp"
-  fi
-}
-
-reexec_fresh_env() {
-  if [ "${NOVA_FRESH_REEXEC:-0}" = "1" ]; then
-    export NOVA_CRED_BACKEND=none
-    export NOVA_CRED_ASK_REMEMBER=0
-    return
-  fi
-  local fresh_home
-  fresh_home=$(mktemp -d "${TMPDIR:-/tmp}/nova-fresh-home-XXXXXX")
-  echo "🧪 Fresh mode: re-exec with HOME=$fresh_home"
-  export NOVA_FRESH_REEXEC=1
-  export NOVA_ASSUME_YES="$ASSUME_YES"
-  export HOME="$fresh_home"
-  export XDG_CONFIG_HOME="$HOME/.config"
-  export GH_CONFIG_DIR="$HOME/.config/gh"
-  export GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
-  export PIP_CACHE_DIR="$HOME/.cache/pip"
-  unset OPENAI_API_KEY ANTHROPIC_API_KEY
-  export NOVA_CRED_BACKEND=none
-  export NOVA_CRED_ASK_REMEMBER=0
-  exec /bin/bash "$SCRIPT_PATH" "$@"
-}
-
 # -------------------------
 _ui_color() { tput setaf "$1" 2>/dev/null || true; }
 _ui_reset() { tput sgr0 2>/dev/null || true; }
@@ -167,9 +67,9 @@ UI_GREY=$(_ui_color 8); UI_GREEN=$(_ui_color 2); UI_YELLOW=$(_ui_color 3); UI_CY
 UI_BOLD=$(_ui_bold)
 
 if [ "${NOVA_ASCII_MODE:-0}" = "1" ] || [ "${TERM:-}" = "dumb" ]; then
-  ICON_BOX="[+]" ; ICON_ROCKET="->" ; ICON_CHECK="[OK]" ; ICON_WARN="!" ; ICON_DOT="*"
+  ICON_BOX="[+]" ; ICON_ROCKET="->" ; ICON_CHECK="[OK]" ; ICON_WARN="!" ; ICON_DOT="*" ; KEY="[KEY]" ; LINK_ICON="[URL]"
 else
-  ICON_BOX="📦" ; ICON_ROCKET="🚀" ; ICON_CHECK="✓" ; ICON_WARN="⚠️" ; ICON_DOT="•"
+  ICON_BOX="📦" ; ICON_ROCKET="🚀" ; ICON_CHECK="✓" ; ICON_WARN="⚠️" ; ICON_DOT="•" ; KEY="🔑" ; LINK_ICON="🔗"
 fi
 
 cols() { tput cols 2>/dev/null || echo 80; }
@@ -194,19 +94,6 @@ ok()    { printf "%b%s%b %s\n"   "${UI_GREEN}" "${ICON_CHECK}" "${UI_RESET}" "$*
 warn()  { printf "%b%s%b %s\n"   "${UI_YELLOW}" "${ICON_WARN}"  "${UI_RESET}" "$*"; }
 note()  { printf "%b%s%b %s\n"   "${UI_GREY}"  "${ICON_DOT}"    "${UI_RESET}" "$*"; }
 
-watch_workflow_with_timeout() {
-  local run_id="$1"
-  local timeout_seconds="${2:-300}"
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$timeout_seconds" gh run watch "$run_id"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$timeout_seconds" gh run watch "$run_id"
-  else
-    warn "'timeout' command not available; streaming logs until the run completes (Ctrl+C to stop)."
-    gh run watch "$run_id"
-  fi
-}
-
 spinner_run() {
   local msg="$1"; shift
   local frames i=0
@@ -228,6 +115,37 @@ spinner_run() {
     [ -s /tmp/nova_step.err ] && sed -e 's/^/  /' </tmp/nova_step.err
     return $ec
   fi
+}
+
+# Quickstart-level toggles driven by CLI flags or interactive choices
+ASSUME_YES=0
+USE_EXISTING_REPO=""
+GITHUB_TOKEN_SCOPES=""
+GITHUB_IDENTITY=""
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+confirm() {
+  local prompt="$1"
+  local reply=""
+  if [ "$ASSUME_YES" = "1" ]; then
+    return 0
+  fi
+  if [ -e /dev/tty ]; then
+    printf "%s [Y/n] " "$prompt" > /dev/tty 2>/dev/null || true
+    IFS= read -r reply < /dev/tty || reply=""
+    printf "\n" > /dev/tty 2>/dev/null || true
+  elif [ -t 0 ]; then
+    read -r -p "$prompt [Y/n] " reply || reply=""
+  else
+    return 1
+  fi
+  if [ -z "$reply" ] || [[ "$reply" =~ ^[Yy]$ ]]; then
+    return 0
+  fi
+  return 1
 }
 
 # Secret masking utilities
@@ -287,61 +205,6 @@ setup_logging() {
 ORIGINAL_VENV="${VIRTUAL_ENV:-}"
 
 # Terminal capabilities detection
-ORIGINAL_ARGS=("$@")
-PARSED_ARGS=()
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --fresh)
-      FRESH_MODE=1
-      shift
-      ;;
-    --reset-keys)
-      RESET_KEYS=1
-      shift
-      ;;
-    --purge)
-      PURGE_TEMP=1
-      shift
-      ;;
-    --no-keychain)
-      NO_KEYCHAIN_FLAG=1
-      shift
-      ;;
-    --yes|-y)
-      ASSUME_YES=1
-      shift
-      ;;
-    --)
-      shift
-      while [ $# -gt 0 ]; do
-        PARSED_ARGS+=("$1")
-        shift
-      done
-      break
-      ;;
-    *)
-      PARSED_ARGS+=("$1")
-      shift
-      ;;
-  esac
-  [ $# -eq 0 ] && break
-done
-
-set -- "${PARSED_ARGS[@]}"
-
-if [ "$NO_KEYCHAIN_FLAG" = "1" ]; then
-  export NOVA_CRED_BACKEND="envfile"
-fi
-if [ "$RESET_KEYS" = "1" ]; then
-  reset_saved_keys
-fi
-if [ "$PURGE_TEMP" = "1" ]; then
-  purge_temp_workspaces
-fi
-if [ "$FRESH_MODE" = "1" ]; then
-  reexec_fresh_env "$@"
-fi
-
 if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
     COLS=$(tput cols 2>/dev/null || echo 80)
     LINES=$(tput lines 2>/dev/null || echo 24)
@@ -428,9 +291,27 @@ LOG_FILE="/tmp/nova-quickstart-${TIMESTAMP}.log"
 NOVA_ENV_FILE="${NOVA_ENV_FILE:-$HOME/.nova.env}"
 
 load_nova_env() {
-    if [ -f "$NOVA_ENV_FILE" ]; then
-        set -a; . "$NOVA_ENV_FILE" 2>/dev/null || true; set +a
-    fi
+    local file="$NOVA_ENV_FILE"
+    local line key value
+    [ -f "$file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%$'\r'}"
+        case "$line" in
+            ''|'#'* ) continue ;;
+        esac
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+            if [[ "$value" =~ ^".*"$ ]]; then
+                value="${value:1:${#value}-2}"
+            elif [[ "$value" =~ ^'.*'$ ]]; then
+                value="${value:1:${#value}-2}"
+            fi
+            if [ -z "${!key:-}" ]; then
+                export "$key=$value"
+            fi
+        fi
+    done < "$file"
 }
 
 _upsert_env() { # _upsert_env KEY VALUE
@@ -588,6 +469,62 @@ check_requirements() {
         done
     fi
     
+    return 0
+}
+
+check_github_prereqs() {
+    GITHUB_TOKEN_SCOPES=""
+    GITHUB_IDENTITY=""
+
+    if ! have_cmd gh; then
+        warn "GitHub CLI (gh) is required for this demo"
+        echo -e "${YELLOW}Install gh and re-run, or choose the Local demo.${NC}"
+        echo -e "  ${DIM}macOS:${NC} brew install gh"
+        echo -e "  ${DIM}Ubuntu:${NC} sudo apt install gh"
+        echo -e "  ${DIM}Docs:${NC} https://cli.github.com/manual/installation"
+        return 2
+    fi
+
+    if ! gh auth status >/dev/null 2>&1; then
+        warn "GitHub authentication required"
+        local login_flags=(-s "repo,workflow")
+        if [ -t 1 ] || [ -t 0 ]; then
+            login_flags=(-w "${login_flags[@]}")
+        fi
+        if ! gh auth login "${login_flags[@]}"; then
+            warn "Unable to authenticate with GitHub CLI"
+            echo "Run: gh auth login -w -s \"repo,workflow\""
+            return 2
+        fi
+    fi
+
+    local scopes
+    scopes=$(gh auth status -t 2>/dev/null | sed -n 's/.*Token scopes: //p') || scopes=""
+    if [ -n "$scopes" ]; then
+        GITHUB_TOKEN_SCOPES="$scopes"
+        local has_repo=0 has_workflow=0
+        case ",$scopes," in
+            *",repo,"*|*",public_repo,"*) has_repo=1 ;;
+        esac
+        case ",$scopes," in
+            *",workflow,"*) has_workflow=1 ;;
+        esac
+        if [ $has_repo -eq 0 ]; then
+            warn "Missing required 'repo' scope on GitHub token"
+            echo "Fix: gh auth refresh -h github.com -s repo,workflow"
+            return 2
+        fi
+        if [ $has_workflow -eq 0 ]; then
+            warn "Missing required 'workflow' scope on GitHub token"
+            echo "Fix: gh auth refresh -h github.com -s repo,workflow"
+            return 2
+        fi
+    else
+        note "Could not read token scopes from gh auth status"
+    fi
+
+    GITHUB_IDENTITY=$(gh api user --jq .login 2>/dev/null || gh auth status 2>&1 | awk '/Logged in to github.com as/ {print $7}' || true)
+
     return 0
 }
 
@@ -804,25 +741,113 @@ cred_store_set() {
   esac
 }
 
+cred_backend_label() {
+  case "$1" in
+    keychain)
+      if command -v security >/dev/null 2>&1 && [ "$(uname)" = "Darwin" ]; then
+        echo "macOS Keychain"
+      elif command -v secret-tool >/dev/null 2>&1; then
+        echo "system keyring"
+      else
+        echo "secure keychain"
+      fi
+      ;;
+    envfile)
+      echo "$NOVA_ENV_FILE (chmod 600)"
+      ;;
+    none|*)
+      echo "session memory"
+      ;;
+  esac
+}
+
+credential_prompt_preface() {
+  local var="$1"
+  [ -t 0 ] || return 0
+  case "$var" in
+    OPENAI_API_KEY)
+      echo
+      echo -e "${KEY} ${BOLD}OpenAI API key required${NC}"
+      echo -e "  ${DIM}Nova uses OpenAI to analyze and fix code in your repo.${NC}"
+      echo -e "  ${LINK_ICON} Create or manage keys: ${UNDERLINE}${NOVA_CYAN}https://platform.openai.com/api-keys${NC}"
+      echo -e "  ${DIM}Tip:${NC} export OPENAI_API_KEY=sk-... or add it to ${NOVA_ENV_FILE} to skip future prompts."
+      echo
+      ;;
+    CLOUDSMITH_ENTITLEMENT|CLOUDSMITH_TOKEN|OPENAI_ENTITLEMENT_TOKEN)
+      echo
+      echo -e "${KEY} ${BOLD}Cloudsmith entitlement token${NC}"
+      echo -e "  ${DIM}Allows read-only access to Nova's private package index.${NC}"
+      echo -e "  ${LINK_ICON} Generate a token in Cloudsmith → Account → Entitlement Tokens."
+      echo -e "  ${DIM}Use a read-only token and store it as CLOUDSMITH_ENTITLEMENT.${NC}"
+      echo
+      ;;
+  esac
+}
+
+set_cred_source() {
+  local var="$1" source="$2"
+  local name="NOVA_CRED_SOURCE_${var}"
+  printf -v "$name" '%s' "$source"
+}
+
+get_cred_source() {
+  local var="$1" name="NOVA_CRED_SOURCE_${var}"
+  printf '%s' "${!name:-}"
+}
+
 cache_secret() {
-  local var="$1" label="$2" v
-  if [ -n "${!var:-}" ]; then return 0; fi
-  v="$(cred_store_get "$var" | head -n1 || true)"
-  if [ -n "$v" ]; then export "$var=$v"; return 0; fi
-  if [ -e /dev/tty ]; then
-    printf "%s: " "$label" > /dev/tty 2>/dev/null || true
-    IFS= read -rs v < /dev/tty || true
-    echo > /dev/tty 2>/dev/null || echo
-  elif [ -t 0 ]; then
-    read -rs -p "$label: " v; echo
-  else
-    echo "Error: $var is required but not set (non-interactive)." >&2
+  local var="$1" label="$2"
+  local backend value masked ans target
+  backend="$(cred_backend_detect)"
+
+  if [ -n "${!var:-}" ]; then
+    masked="$(mask_preview "${!var}")"
+    note "$var provided via environment (${masked})"
+    set_cred_source "$var" "environment"
+    return 0
+  fi
+
+  value="$(cred_store_get "$var" | head -n1 || true)"
+  if [ -n "$value" ]; then
+    export "$var=$value"
+    masked="$(mask_preview "$value")"
+    target="$(cred_backend_label "$backend")"
+    note "$var loaded from $target (${masked})"
+    set_cred_source "$var" "$target"
+    return 0
+  fi
+
+  if [ ! -t 0 ]; then
+    echo "Error: $var is required but not set. Provide it via an environment variable (e.g., export $var=...) or add it to ${NOVA_ENV_FILE}." >&2
     return 1
   fi
-  [ -z "$v" ] && { echo "Error: $var is required." >&2; return 1; }
-  export "$var=$v"
-  if [ "${NOVA_CRED_ASK_REMEMBER}" = "1" ] && [ -t 0 ]; then
-    local ans="y"
+
+  credential_prompt_preface "$var"
+
+  while [ -z "${value:-}" ]; do
+    if [ -e /dev/tty ]; then
+      printf "%s: " "$label" > /dev/tty 2>/dev/null || true
+      IFS= read -rs value < /dev/tty || true
+      echo > /dev/tty 2>/dev/null || echo
+    else
+      read -rs -p "$label: " value; echo
+    fi
+    if [ -z "${value:-}" ]; then
+      echo -e "${YELLOW}Value is required.${NC}" >&2
+    fi
+  done
+
+  export "$var=$value"
+  masked="$(mask_preview "$value")"
+  note "$var captured (${masked})"
+  set_cred_source "$var" "prompt"
+
+  if [ "$var" = "OPENAI_API_KEY" ] && ! looks_like_openai_key "$value"; then
+    warn "Key doesn't match the usual sk-/sk-proj- format. Double-check before continuing."
+  fi
+
+  if [ "${NOVA_CRED_ASK_REMEMBER}" = "1" ]; then
+    ans="y"
     if [ -e /dev/tty ]; then
       printf "Remember for next time? [Y/n] " > /dev/tty 2>/dev/null || true
       IFS= read -r ans < /dev/tty || true
@@ -830,7 +855,12 @@ cache_secret() {
       read -r -p "Remember for next time? [Y/n] " ans || true
     fi
     if [[ ! "$ans" =~ ^[Nn]$ ]]; then
-      cred_store_set "$var" "$v"
+      cred_store_set "$var" "$value"
+      target="$(cred_backend_label "$backend")"
+      note "Saved $var to $target"
+      set_cred_source "$var" "$target"
+    else
+      note "$var kept in session memory only"
     fi
   fi
 }
@@ -980,6 +1010,51 @@ prompt_credentials() {
     remember_credentials
 }
 
+ensure_core_credentials() {
+    echo
+    echo -e "${BOLD}Credentials${NC}"
+    echo -e "${DIM}Input is hidden; we only display masked previews and storage locations.${NC}"
+    echo
+
+    if [ -z "${CLOUDSMITH_ENTITLEMENT:-}" ]; then
+        if [ -n "${CLOUDSMITH_TOKEN:-}" ]; then
+            export CLOUDSMITH_ENTITLEMENT="$CLOUDSMITH_TOKEN"
+        elif [ -n "${NOVA_CLOUDSMITH_TOKEN:-}" ]; then
+            export CLOUDSMITH_ENTITLEMENT="$NOVA_CLOUDSMITH_TOKEN"
+        fi
+    fi
+
+    cache_secret OPENAI_API_KEY "Enter your OpenAI API key (sk-...)" || return 1
+    cache_secret CLOUDSMITH_ENTITLEMENT "Enter your Cloudsmith entitlement token" || return 1
+
+    if [ -n "${CLOUDSMITH_ENTITLEMENT:-}" ]; then
+        export CLOUDSMITH_TOKEN="${CLOUDSMITH_ENTITLEMENT}"
+        export OPENAI_ENTITLEMENT_TOKEN="${CLOUDSMITH_ENTITLEMENT}"
+    fi
+
+    echo
+    echo -e "${BOLD}Credential summary:${NC}"
+    if [ -n "${OPENAI_API_KEY:-}" ]; then
+        local openai_src mask
+        openai_src="$(get_cred_source OPENAI_API_KEY)"
+        [ -z "$openai_src" ] && openai_src="environment"
+        mask="$(mask_preview "$OPENAI_API_KEY")"
+        echo -e "  ${ICON_CHECK} OpenAI API key ${DIM}(${mask}, ${openai_src})${NC}"
+    fi
+    if [ -n "${CLOUDSMITH_ENTITLEMENT:-}" ]; then
+        local cloudsmith_src mask
+        cloudsmith_src="$(get_cred_source CLOUDSMITH_ENTITLEMENT)"
+        [ -z "$cloudsmith_src" ] && cloudsmith_src="environment"
+        mask="$(mask_preview "$CLOUDSMITH_ENTITLEMENT")"
+        echo -e "  ${ICON_CHECK} Cloudsmith entitlement ${DIM}(${mask}, ${cloudsmith_src})${NC}"
+    fi
+    echo
+    echo -e "${DIM}Need to rotate a key? Update the env var or run with NOVA_FORCE_PROMPT=1.${NC}"
+    echo
+
+    return 0
+}
+
 ########################################
 # Welcome Screen
 ########################################
@@ -1016,22 +1091,22 @@ show_welcome() {
 
 show_demo_menu() {
     if [ -e /dev/tty ]; then
-        printf "%b\n" "${BOLD}${NOVA_BLUE}Choose how to try it (press Enter):${NC}" > /dev/tty 2>/dev/null || true
+        printf "%b\n" "${BOLD}${NOVA_BLUE}Choose how to try it (press Enter for Local):${NC}" > /dev/tty 2>/dev/null || true
         printf "\n" > /dev/tty 2>/dev/null || true
         # Local Demo Option (1)
-        printf "%b\n" "  1) Local demo ${DIM}(2–3 min)${NC}   — See red → green on your machine" > /dev/tty 2>/dev/null || true
+        printf "%b\n" "  1) Local demo ${DIM}(2–3 min)${NC}   — See red → green on your machine ${DIM}(default)${NC}" > /dev/tty 2>/dev/null || true
         printf "\n" > /dev/tty 2>/dev/null || true
         # GitHub Actions Demo Option (2)
-        printf "%b\n" "  2) GitHub Actions ${DIM}(5–7 min)${NC} — Watch a live CI rescue in a PR ${DIM}(requires gh auth login)${NC}" > /dev/tty 2>/dev/null || true
+        printf "%b\n" "  2) GitHub Actions ${DIM}(5–7 min)${NC} — Watch a live CI rescue in a PR ${DIM}(gh login + repo/workflow scopes required)${NC}" > /dev/tty 2>/dev/null || true
         printf "\n\n" > /dev/tty 2>/dev/null || true
         print_line > /dev/tty 2>/dev/null || true
         printf "\n" > /dev/tty 2>/dev/null || true
     else
-        echo -e "${BOLD}${NOVA_BLUE}Choose how to try it (press Enter):${NC}"
+        echo -e "${BOLD}${NOVA_BLUE}Choose how to try it (press Enter for Local):${NC}"
         echo
-        echo -e "  1) Local demo ${DIM}(2–3 min)${NC}   — See red → green on your machine"
+        echo -e "  1) Local demo ${DIM}(2–3 min)${NC}   — See red → green on your machine ${DIM}(default)${NC}"
         echo
-        echo -e "  2) GitHub Actions ${DIM}(5–7 min)${NC} — Watch a live CI rescue in a PR ${DIM}(requires gh auth login)${NC}"
+        echo -e "  2) GitHub Actions ${DIM}(5–7 min)${NC} — Watch a live CI rescue in a PR ${DIM}(gh login + repo/workflow scopes required)${NC}"
         echo
         echo
         print_line
@@ -1081,70 +1156,97 @@ run_local_demo() {
 }
 
 run_github_demo() {
-    local prev_dir=$(pwd)
-    trap 'cd "$prev_dir"' RETURN
-
     header "Nova CI–Rescue – GitHub Quickstart" "See Nova fix failing tests in GitHub Actions"
     echo -e "${BOLD}Estimated time:${NC} ~5–7 minutes"
     echo
 
     local TOTAL=8
+    local -a passthrough_args=()
+    local REPO_FULL_NAME=""
 
-    step 1 $TOTAL "🔐" "Verify GitHub CLI access"
-    note "We use the GitHub CLI to create a throwaway demo repository."
-    if ! command -v gh &>/dev/null; then
-        warn "GitHub CLI (gh) is required for this demo"
-        echo -e "${YELLOW}Install with:${NC}"
-        echo -e "  ${DIM}brew install gh${NC}  (macOS)"
-        echo -e "  ${DIM}sudo apt install gh${NC}  (Ubuntu)"
-        echo
-        echo -e "Or try the ${BOLD}Local Demo${NC} instead (option 1)"
-        return 1
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --use-existing=*)
+                USE_EXISTING_REPO="${1#*=}"
+                ;;
+            --use-existing)
+                if [ $# -lt 2 ]; then
+                    warn "--use-existing requires OWNER/REPO"
+                    return 1
+                fi
+                USE_EXISTING_REPO="$2"
+                shift
+                ;;
+            --yes|-y)
+                ASSUME_YES=1
+                ;;
+            *)
+                passthrough_args+=("$1")
+                ;;
+        esac
+        shift || break
+    done
+    set -- "${passthrough_args[@]}"
+
+    step 1 $TOTAL "$ICON_WARN" "Set up GitHub CLI access"
+    note "We need GitHub CLI access to create a temporary demo repo."
+    note "We'll reuse your existing gh login—credentials stay with GitHub."
+
+    if ! check_github_prereqs; then
+        return 2
     fi
 
-    local gh_scopes="" gh_identity=""
-    if gh auth status &>/dev/null; then
-        gh_scopes=$(gh auth status -t 2>/dev/null | sed -n 's/.*Token scopes: //p') || gh_scopes=""
-        if [ -n "$gh_scopes" ]; then
-            note "Reusing existing GitHub CLI session (scopes: $gh_scopes)"
-        else
-            note "Reusing existing GitHub CLI session."
-        fi
-    else
-        if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
-            note "No gh login found, but GH_TOKEN detected – continuing with token auth."
-        elif [ -t 0 ]; then
-            warn "GitHub authentication required"
-            echo -e "${DIM}Running: gh auth login -s \"repo,workflow\"${NC}"
-            echo
-            gh auth login -s "repo,workflow"
-        else
-            echo -e "${RED}✗ GitHub CLI not authenticated${NC}"
-            echo "Set GH_TOKEN / GITHUB_TOKEN or run 'gh auth login -s \"repo,workflow\"' before retrying."
-            return 1
-        fi
-    fi
-
-    if ! gh auth status &>/dev/null; then
-        echo -e "${RED}✗ GitHub authentication failed${NC}"
-        echo "Run: gh auth login -s \"repo,workflow\""
-        return 1
-    fi
-
-    gh_identity=$(gh api user --jq .login 2>/dev/null || gh auth status 2>&1 | awk '/Logged in to github.com as/ {print $7}' || true)
-    if [ -n "$gh_identity" ]; then
-        ok "GitHub CLI authenticated as $gh_identity"
+    if [ -n "$GITHUB_IDENTITY" ]; then
+        ok "GitHub CLI authenticated as $GITHUB_IDENTITY"
     else
         ok "GitHub CLI authenticated"
     fi
-    if [ -n "$gh_scopes" ]; then
-        note "Token scopes: $gh_scopes"
+
+    if [ -n "$GITHUB_TOKEN_SCOPES" ]; then
+        note "Token scopes: $GITHUB_TOKEN_SCOPES"
     fi
+
+    if [ -n "$USE_EXISTING_REPO" ]; then
+        note "Target repository: $USE_EXISTING_REPO"
+    fi
+
+    # Show the viewer (helps catch mismatches early)
+    VIEWER=""
+    VIEWER=$(gh api graphql -f query='query{viewer{login}}' --jq .data.viewer.login 2>/dev/null || true)
+    if [ -n "$VIEWER" ]; then
+        note "GitHub viewer: $VIEWER"
+    fi
+
+    echo "Checking GitHub permissions..."
+    CAN_CREATE_REPOS="unknown"
+    PERM_OUTPUT=""
+    PERM_STATUS=0
+    set +e
+    PERM_OUTPUT=$(gh api graphql \
+        -f query='query { viewer { login } viewerCanCreateRepositories }' \
+        --template '{{.data.viewer.login}} {{.data.viewerCanCreateRepositories}}' 2>&1)
+    PERM_STATUS=$?
+    set -e
+
+    if [ $PERM_STATUS -eq 0 ]; then
+        read -r LOGIN CAN_CREATE <<<"$PERM_OUTPUT"
+        if [ "$CAN_CREATE" = "true" ]; then
+            CAN_CREATE_REPOS="true"
+            ok "GitHub permissions verified for account: $LOGIN"
+        else
+            CAN_CREATE_REPOS="false"
+            warn "Account '$LOGIN' cannot create repositories"
+        fi
+    else
+        CAN_CREATE_REPOS="unknown"
+        warn "Cannot verify repository permissions"
+        echo "If repository creation fails, try: gh auth refresh -h github.com -s repo,workflow"
+    fi
+
     echo
 
     if [ -z "${OPENAI_API_KEY:-}" ]; then
         echo -e "${RED}✗ OpenAI API key not found${NC}"
-        echo "This should have been set earlier in the script."
         return 1
     fi
 
@@ -1159,18 +1261,21 @@ run_github_demo() {
     source .venv/bin/activate
     export PIP_DISABLE_PIP_VERSION_CHECK=1
 
+    # Install Nova with robust fallbacks (inspired by the patch)
     INSTALL_ARGS=(nova-ci-rescue pytest requests openai)
     INSTALL_SUCCESS=0
 
+    # Clean up any existing nova shims to avoid conflicts
     rm -f ~/.pyenv/shims/nova 2>/dev/null || true
     rm -f ~/Library/Python/*/bin/nova 2>/dev/null || true
     rm -f ~/.local/bin/nova 2>/dev/null || true
 
     python3 -m pip install --upgrade pip >/dev/null 2>&1
 
-    if [ -n "${CLOUDSMITH_ENTITLEMENT:-}" ]; then
+    if [ -n "${CLOUDSMITH_ENTITLEMENT}" ]; then
         CLOUDSMITH_URL="https://dl.cloudsmith.io/${CLOUDSMITH_ENTITLEMENT}/nova/nova-ci-rescue/python/simple/"
         echo "Trying Cloudsmith installation..."
+
         set +e
         python3 -m pip install -U --no-cache-dir --force-reinstall \
             "${INSTALL_ARGS[@]}" \
@@ -1179,7 +1284,8 @@ run_github_demo() {
             --quiet >/dev/null 2>&1
         INSTALL_STATUS=$?
         set -e
-        if [ $INSTALL_STATUS -eq 0 ]; then
+
+        if [ ${INSTALL_STATUS} -eq 0 ]; then
             INSTALL_SUCCESS=1
             echo "✓ Installed from Cloudsmith"
         else
@@ -1195,17 +1301,21 @@ run_github_demo() {
             --quiet >/dev/null 2>&1
         INSTALL_STATUS=$?
         set -e
-        if [ $INSTALL_STATUS -eq 0 ]; then
+
+        if [ ${INSTALL_STATUS} -eq 0 ]; then
             INSTALL_SUCCESS=1
             echo "✓ Installed from PyPI"
         else
             echo "⚠️  PyPI install failed; trying underscore variant..."
+
+            # Try underscore variant as fallback
             set +e
             python3 -m pip install -U --no-cache-dir --force-reinstall nova_ci_rescue \
                 --quiet >/dev/null 2>&1
             INSTALL_STATUS=$?
             set -e
-            if [ $INSTALL_STATUS -eq 0 ]; then
+
+            if [ ${INSTALL_STATUS} -eq 0 ]; then
                 INSTALL_SUCCESS=1
                 echo "✓ Installed underscore variant from PyPI"
             fi
@@ -1222,6 +1332,7 @@ run_github_demo() {
         return 1
     fi
 
+    # Verify installation
     if command -v nova >/dev/null 2>&1; then
         NOVA_VERSION=$(nova --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "latest")
         echo "✓ Nova ${NOVA_VERSION} installed successfully"
@@ -1232,7 +1343,8 @@ run_github_demo() {
 
     step 4 $TOTAL "🧪" "Generate demo repo (failing tests)"
 
-    cat > calculator.py <<'EOF'
+    # Create demo repo with failing calculator
+    cat > calculator.py << 'EOF'
 def add(a, b):
     return a - b
 
@@ -1243,7 +1355,7 @@ def power(a, b):
     return a * b
 EOF
 
-    cat > test_calculator.py <<'EOF'
+    cat > test_calculator.py << 'EOF'
 from calculator import add, multiply, power
 
 def test_add():
@@ -1256,54 +1368,102 @@ def test_power():
     assert power(2, 3) == 8
 EOF
 
+    # Initialize git repo
     git init -q
     git config user.email "demo@nova.ai"
     git config user.name "Nova Demo"
 
+    # Smart repository creation with fallbacks
+    OWNER="${NOVA_GH_OWNER:-$VIEWER}"
     REPO_NAME="nova-demo-$(date +%s)"
-    echo "Creating GitHub repository: $REPO_NAME"
+    DEMO_MODE="new_repo"
 
-    GITHUB_USER=""
-    if gh auth status >/dev/null 2>&1; then
-        GITHUB_USER=$(gh api user --jq .login 2>/dev/null || echo "")
-        if [ -z "$GITHUB_USER" ]; then
-            GITHUB_USER=$(gh auth status 2>&1 | grep -oE 'account [^[:space:]]+' | cut -d' ' -f2 || echo "")
+    if [ -n "$USE_EXISTING_REPO" ]; then
+        if [[ "$USE_EXISTING_REPO" != */* ]]; then
+            warn "--use-existing expects OWNER/REPO"
+            return 1
         fi
+        OWNER="${USE_EXISTING_REPO%/*}"
+        REPO_NAME="${USE_EXISTING_REPO#*/}"
+        git remote add origin "https://github.com/${USE_EXISTING_REPO}.git"
+        echo "✓ Using existing repository: $USE_EXISTING_REPO"
     fi
 
-    if [ -z "$GITHUB_USER" ]; then
-        echo -e "${RED}✗ Could not determine GitHub user/organization${NC}"
-        echo "Please ensure you're logged in with: gh auth login -s \"repo,workflow\""
-        return 1
-    fi
-    if [ -n "${NOVA_DEFAULT_GITHUB_OWNER:-}" ]; then
-        GITHUB_USER="$NOVA_DEFAULT_GITHUB_OWNER"
-        note "Overriding GitHub owner with NOVA_DEFAULT_GITHUB_OWNER=$NOVA_DEFAULT_GITHUB_OWNER"
-    fi
+    create_new_repo() {
+        echo "Creating GitHub repository: ${OWNER}/${REPO_NAME}"
+        if gh repo create "${OWNER}/${REPO_NAME}" --public --description "Nova CI-Rescue Demo: Automatic test fixing" --clone=false 2>/tmp/gh_create_error; then
+            git remote add origin "https://github.com/${OWNER}/${REPO_NAME}.git"
+            echo "✓ Created new repository: ${OWNER}/${REPO_NAME}"
+            return 0
+        else
+            echo -e "${YELLOW}⚠️  Repository creation failed${NC}"
+            if [ -f /tmp/gh_create_error ]; then
+                echo "Error details:"
+                cat /tmp/gh_create_error
 
-    echo "Creating repository as: $GITHUB_USER/$REPO_NAME"
+                # SSO-friendly prompt for org users
+                if grep -q "SSO\|SAML\|organization" /tmp/gh_create_error 2>/dev/null; then
+                    echo
+                    echo -e "${CYAN}💡 Tip: If your org enforces SSO, run:${NC}"
+                    echo -e "   ${DIM}gh auth refresh -h github.com -s repo -s workflow -s read:org${NC}"
+                    echo -e "   ${DIM}then re-run this demo.${NC}"
+                fi
+            fi
+            return 1
+        fi
+    }
 
-    if ! gh repo create "$GITHUB_USER/$REPO_NAME" --public --description "Nova CI-Rescue Demo" --clone=false --confirm >/tmp/gh_error 2>&1; then
-        echo -e "${RED}✗ Failed to create GitHub repository${NC}"
-        cat /tmp/gh_error
-        echo
-        echo "Possible solutions:"
-        echo "1. Make sure you have repository creation permissions"
-        echo "2. Try logging in as a user account: gh auth login -s \"repo,workflow\""
-        echo "3. If using an organization, ensure you have proper permissions"
-        return 1
-    fi
+    use_branch_only_mode() {
+        echo "Trying branch-only mode in current repository..."
+        if git rev-parse --show-toplevel >/dev/null 2>&1; then
+            BRANCH_NAME="demo/nova-fix-$(date +%s)"
+            git checkout -b "$BRANCH_NAME" 2>/dev/null || git switch -c "$BRANCH_NAME"
+            echo "✓ Using branch-only mode: $BRANCH_NAME"
+            DEMO_MODE="branch_only"
+            return 0
+        else
+            echo "⚠️  Not in a git repository"
+            return 1
+        fi
+    }
 
-    if git remote get-url origin >/dev/null 2>&1; then
-        git remote set-url origin "https://github.com/${GITHUB_USER}/$REPO_NAME.git"
+    use_local_only_mode() {
+        echo "Using local-only mode (no GitHub integration)"
+        DEMO_MODE="local_only"
+        REPO_NAME="local-demo"
+        OWNER="local"
+        echo "✓ Demo will run locally with manual workflow simulation"
+        return 0
+    }
+
+    if [ -z "$USE_EXISTING_REPO" ]; then
+        # Try creation strategies in order
+        if [ "$CAN_CREATE_REPOS" = "true" ] && [ -n "$OWNER" ]; then
+            if create_new_repo; then
+                echo "✓ Repository creation successful"
+            elif use_branch_only_mode; then
+                echo "✓ Fallback to branch-only mode successful"
+            else
+                use_local_only_mode
+            fi
+        elif use_branch_only_mode; then
+            echo "✓ Using branch-only mode (no repo creation permissions)"
+        else
+            use_local_only_mode
+        fi
     else
-        git remote add origin "https://github.com/${GITHUB_USER}/$REPO_NAME.git"
+        echo "Skipping repository creation; using existing remote."
     fi
+
+    # Set variables for later use
+    GITHUB_USER="$OWNER"
+    export DEMO_MODE GITHUB_USER REPO_NAME
 
     step 5 $TOTAL "🏗️" "Provision GitHub Actions workflow"
 
+    # Create workflow that will use Nova
     mkdir -p .github/workflows
-    cat > .github/workflows/ci.yml <<'YAML'
+    cat > .github/workflows/ci.yml << 'YAML'
 name: CI with Nova Auto-Fix
 
 on:
@@ -1328,12 +1488,11 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
-          cache: pip
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install -U pip
           python -m pip install pytest
 
       - name: Run tests (initial)
@@ -1345,17 +1504,28 @@ jobs:
 
       - name: Install Nova CI-Rescue
         if: steps.pytest_initial.outputs.passed == 'false'
+        env:
+          CLOUDSMITH_ENTITLEMENT: ${{ secrets.CLOUDSMITH_ENTITLEMENT }}
         run: |
-          python -m pip install -U --no-cache-dir nova-ci-rescue \
-            --index-url "https://dl.cloudsmith.io/uvm95DprtlQod6Cy/nova/nova-ci-rescue/python/simple/" \
-            --extra-index-url "https://pypi.org/simple"
+          echo "🚀 Installing Nova CI-Rescue..."
+          if [ -z "${CLOUDSMITH_ENTITLEMENT}" ]; then
+            echo "CLOUDSMITH_ENTITLEMENT secret is required" >&2
+            exit 1
+          fi
+          CLOUDSMITH_URL="https://dl.cloudsmith.io/${CLOUDSMITH_ENTITLEMENT}/nova/nova-ci-rescue/python/simple/"
+          python -m pip install -U --no-cache-dir --force-reinstall nova-ci-rescue \
+            --index-url "${CLOUDSMITH_URL}" \
+            --extra-index-url "https://pypi.org/simple" --quiet
+          echo "✅ Nova CI-Rescue installed successfully"
 
       - name: Nova auto-fix
         if: steps.pytest_initial.outputs.passed == 'false'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          echo "🤖 Nova CI-Rescue: Attempting to fix failing tests..."
           nova fix --quiet --max-iters 3
+          echo "✅ Nova completed fixing process"
 
       - name: Run tests (after fix)
         if: steps.pytest_initial.outputs.passed == 'false'
@@ -1369,38 +1539,115 @@ YAML
 
     step 6 $TOTAL "🔎" "Run first CI (expected to fail)"
 
-    git push -u origin main
+    case "$DEMO_MODE" in
+        "new_repo")
+            # Push to new repository
+            git push -u origin main
+            echo "Setting OpenAI API key as GitHub secret..."
+            echo "$OPENAI_API_KEY" | gh secret set OPENAI_API_KEY --repo="${GITHUB_USER}/${REPO_NAME}"
+            if [ -n "${CLOUDSMITH_ENTITLEMENT:-}" ]; then
+                echo "Setting Cloudsmith entitlement as GitHub secret..."
+                echo "$CLOUDSMITH_ENTITLEMENT" | gh secret set CLOUDSMITH_ENTITLEMENT --repo="${GITHUB_USER}/${REPO_NAME}"
+            fi
+            echo "✓ Repository pushed, CI will run shortly"
+            echo "✓ Secrets configured (OpenAI API key${CLOUDSMITH_ENTITLEMENT:+, Cloudsmith entitlement})"
+            ;;
+        "branch_only")
+            # Push branch and create PR
+            git push -u origin "$BRANCH_NAME"
+            echo "Setting OpenAI API key as GitHub secret..."
+            echo "$OPENAI_API_KEY" | gh secret set OPENAI_API_KEY 2>/dev/null || echo "⚠️  Could not set secret (may need repo admin access)"
 
-    echo "Setting OpenAI API key as GitHub secret..."
-    if ! gh secret set OPENAI_API_KEY --repo "$GITHUB_USER/$REPO_NAME" --body "$OPENAI_API_KEY" >/tmp/gh_secret.log 2>&1; then
-        warn "Failed to store OPENAI_API_KEY automatically; add it manually with gh secret set OPENAI_API_KEY --repo $GITHUB_USER/$REPO_NAME"
-        cat /tmp/gh_secret.log
-    else
-        echo "✓ OpenAI API key configured as GitHub secret"
-    fi
+            # Create PR to trigger workflow
+            PR_URL=$(gh pr create --title "Nova CI-Rescue Demo: Fix failing tests" \
+                --body "This PR demonstrates Nova CI-Rescue automatically fixing failing tests in CI." \
+                --base main --head "$BRANCH_NAME" 2>/dev/null || echo "")
 
-    echo "✓ Repository pushed, CI will run shortly"
+            if [ -n "$PR_URL" ]; then
+                echo "✓ Pull request created: $PR_URL"
+                echo "✓ CI will run on the PR"
+            else
+                echo "⚠️  Could not create PR automatically. Push completed to branch: $BRANCH_NAME"
+            fi
+            ;;
+        "local_only")
+            echo "✓ Running local simulation (no GitHub push)"
+            echo "This will demonstrate Nova fixing tests locally instead of in CI"
+            ;;
+    esac
 
     step 7 $TOTAL "🤖" "Nova auto‑fix in CI"
 
-    echo "Waiting for CI to start..."
-    sleep 10
+    case "$DEMO_MODE" in
+        "new_repo"|"branch_only")
+            # Wait a moment for CI to start
+            echo "Waiting for CI to start..."
+            sleep 10
 
-    echo "Monitoring workflow run..."
-    RUN_ID=$(gh run list --limit 1 --json databaseId --jq '.[0].databaseId')
+            # Monitor the workflow run
+            echo "Monitoring workflow run..."
+            RUN_ID=""
+            if [ "$DEMO_MODE" = "new_repo" ]; then
+                RUN_ID=$(gh run list --repo="${GITHUB_USER}/${REPO_NAME}" --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || echo "")
+            else
+                RUN_ID=$(gh run list --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || echo "")
+            fi
 
-    if [ -n "$RUN_ID" ]; then
-        echo "Workflow run ID: $RUN_ID"
-        echo "You can watch the progress at:"
-        echo "https://github.com/${GITHUB_USER}/$REPO_NAME/actions/runs/$RUN_ID"
-        echo "Waiting for workflow to complete (up to 5 minutes)..."
-        watch_workflow_with_timeout "$RUN_ID" 300 || true
-    else
-        warn "No workflow run detected yet; check the Actions tab manually."
-    fi
+            if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ]; then
+                echo "Workflow run ID: $RUN_ID"
+                if [ "$DEMO_MODE" = "new_repo" ]; then
+                    echo "You can watch the progress at:"
+                    echo "https://github.com/${GITHUB_USER}/$REPO_NAME/actions/runs/$RUN_ID"
+                elif [ -n "$PR_URL" ]; then
+                    echo "You can watch the progress in the PR:"
+                    echo "$PR_URL"
+                fi
+
+                # Wait for the run to complete (with timeout)
+                echo "Waiting for workflow to complete (up to 5 minutes)..."
+                echo "Streaming live output from GitHub Actions..."
+                echo
+                # Use gtimeout if available (from coreutils), otherwise just run without timeout
+                if command -v gtimeout >/dev/null 2>&1; then
+                    gtimeout 300 gh run watch "$RUN_ID" || true
+                else
+                    gh run watch "$RUN_ID" || true
+                fi
+            else
+                echo "⚠️  No workflow run detected yet. Check GitHub Actions manually."
+                if [ "$DEMO_MODE" = "new_repo" ]; then
+                    echo "Actions URL: https://github.com/${GITHUB_USER}/$REPO_NAME/actions"
+                elif [ -n "$PR_URL" ]; then
+                    echo "PR URL: $PR_URL"
+                fi
+            fi
+            ;;
+        "local_only")
+            echo "Simulating local Nova fix..."
+
+            # Run tests to show failure
+            echo "Running initial tests (expected to fail):"
+            python3 -m pytest test_calculator.py -v || true
+
+            echo
+            echo "🤖 Running Nova fix locally..."
+            if command -v nova >/dev/null 2>&1; then
+                nova fix --quiet --max-iters 3 --demo-mode || true
+            else
+                echo "⚠️  Nova not available, simulating fix..."
+                # Apply a simple fix to demonstrate
+                sed -i.bak 's/return a - b/return a + b/' calculator.py
+                sed -i.bak 's/return a + b/return a * b/' calculator.py
+                sed -i.bak 's/return a \* b/return a ** b/' calculator.py
+            fi
+
+            echo "✓ Nova fix simulation completed"
+            ;;
+    esac
 
     step 8 $TOTAL "✅" "Verify green build and summarize"
 
+    # Check final status
     FINAL_STATUS=$(gh run list --limit 1 --json conclusion --jq '.[0].conclusion')
 
     echo
@@ -1411,33 +1658,25 @@ YAML
         echo "Check the workflow logs for details"
     fi
 
+    # Show repository URL
     REPO_URL="https://github.com/${GITHUB_USER}/$REPO_NAME"
     echo
     echo -e "${BOLD}Demo Repository:${NC} $REPO_URL"
     echo -e "${BOLD}Actions:${NC} $REPO_URL/actions"
 
-    if [ -z "${NO_BROWSER:-}" ]; then
-        if command -v open >/dev/null 2>&1; then
-            echo
-            read -p "Open repository in browser? [Y/n] " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-                open "$REPO_URL"
-            fi
-        elif command -v xdg-open >/dev/null 2>&1; then
-            echo
-            read -p "Open repository in browser? [Y/n] " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-                xdg-open "$REPO_URL" >/dev/null 2>&1 || true
-            fi
+    # Offer to open in browser
+    if command -v open >/dev/null 2>&1 && [ -z "${NO_BROWSER:-}" ]; then
+        echo
+        read -p "Open repository in browser? [Y/n] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            open "$REPO_URL"
         fi
     fi
 
     echo
     echo -e "${GREEN}✓ GitHub Actions demo complete!${NC}"
 }
-
 
 run_rescue_campaign() {
     echo
@@ -1986,6 +2225,8 @@ main() {
     export OPENAI_ENTITLEMENT_TOKEN="$CLOUDSMITH_ENTITLEMENT"
     echo -e "${GREEN}✓${NC} Cloudsmith entitlement provided"
 
+    echo -e "${DIM}GitHub Actions demo requires: gh auth login -w -s \"repo,workflow\" (scopes managed by gh).${NC}"
+
     echo
     print_line
     echo
@@ -2032,26 +2273,26 @@ main() {
     # Show menu
     show_demo_menu
     
-    # Get user choice (ENTER defaults silently to GitHub Actions)
+    # Get user choice (ENTER defaults silently to Local demo)
     while true; do
         # Print prompt to /dev/tty to avoid buffering under tee; fallback to stdout
         if [ -e /dev/tty ]; then
-            printf "%b" "${NOVA_BLUE}${BOLD}Choose 1 or 2 [ENTER=2]:${NC} " > /dev/tty 2>/dev/null || true
+            printf "%b" "${NOVA_BLUE}${BOLD}Choose 1 or 2 [ENTER=1]:${NC} " > /dev/tty 2>/dev/null || true
             IFS= read -r -n 1 choice < /dev/tty || choice=""
             printf "\n" > /dev/tty 2>/dev/null || true
         else
-            printf "%b" "${NOVA_BLUE}${BOLD}Choose 1 or 2 [ENTER=2]:${NC} "
+            printf "%b" "${NOVA_BLUE}${BOLD}Choose 1 or 2 [ENTER=1]:${NC} "
             IFS= read -r -n 1 choice || choice=""
             echo
         fi
         # Normalize selection
         choice="$(echo -n "$choice" | tr -d '[:space:]')"
-        [ -z "$choice" ] && choice=2
+        [ -z "$choice" ] && choice=1
         
         case $choice in
             1)
                 # Local demo
-                echo "(Option 1) → Local demo"
+                echo "(Default) → Local demo"
                 if run_local_demo "$@"; then
                     break
                 else
@@ -2060,11 +2301,20 @@ main() {
                 ;;
             2)
                 # GitHub Actions integration
-                echo "(Default) → GitHub Actions demo"
+                echo "(Option 2) → GitHub Actions demo"
                 if run_github_demo "$@"; then
                     break
                 else
-                    echo "GitHub demo prerequisites not met. Choose again (try 1 for Local)."
+                    gh_status=$?
+                    if [ "$gh_status" -eq 2 ] && confirm "GitHub demo prerequisites missing. Run the Local demo instead?"; then
+                        if run_local_demo "$@"; then
+                            break
+                        else
+                            echo "Local demo did not complete successfully. Choose again."
+                        fi
+                    else
+                        echo "GitHub demo prerequisites not met. Choose again (try 1 for Local)."
+                    fi
                 fi
                 ;;
             q|Q|quit|exit)
@@ -2340,11 +2590,6 @@ case "${1:-}" in
         echo "  --ci          Generate GitHub Actions workflow in current repo"
         echo "  --local       Run local demo directly"
         echo "  --github      Run GitHub Actions demo directly"
-        echo "  --fresh       Re-run in a clean sandbox (no saved keys, blank HOME)"
-        echo "  --reset-keys  Remove cached OpenAI keys (Keychain + ~/.nova.env)"
-        echo "  --purge       Delete previous demo workspaces under /tmp"
-        echo "  --no-keychain Avoid storing or reading secrets from the system keychain"
-        echo "  --yes         Assume 'yes' for prompts (used with cleanup flags)"
         echo "  --campaign    Start 100 PR Rescue campaign mode"
         echo "  --verbose     Show detailed output"
         echo "  --no-color    Disable ANSI colors in output"
