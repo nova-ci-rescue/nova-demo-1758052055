@@ -1,44 +1,61 @@
 # Nova CI-Rescue Quickstart
 
-This repo packages the interactive CLI experience we use to demo Nova fixing failing CI tests in minutes. The same bundle powers investor walkthroughs and hands-on trials.
+Jump in to see Nova turning red CI green in minutes. This repo packages the guided CLI experience we use for investor demos and onboarding.
 
-## What’s Inside
-- `quickstart-cli.sh` – interactive entrypoint with menus, logging, and secret handling.
-- `scripts/nova_quickstart_github.sh` – GitHub Actions demo helper invoked by the CLI or standalone.
-- `.github/workflows/nova.yml` – workflow template the GitHub demo pushes to the throwaway repo.
-- `AGENTS.md` – contributor guide covering coding style, testing philosophy, and usage tips.
-- `archive/` – legacy bundles that should stay untouched unless you are forensically auditing past releases.
+## Repo structure
+- `quickstart-cli.sh` – the interactive entrypoint described below.
+- `scripts/` – light helper scripts used during demos.
+- `.github/workflows/` – sample workflow the GitHub demo pushes to the throwaway repo.
+- `AGENTS.md` – contributor guide covering coding style, testing expectations, security notes.
+- `archive/` – legacy quickstart bundles kept for reference (don’t modify).
 
-## Running the Demo
-1. Export `OPENAI_API_KEY` (and `CLOUDSMITH_ENTITLEMENT` / `CLOUDSMITH_TOKEN`) or place them in `~/.nova.env`.
-2. `bash quickstart-cli.sh` and choose:
-   - `1` for the local calculator rescue (no network writes).
-   - `2` for the GitHub Actions flow. Authenticate with `gh auth login` and, if needed, provide `--org <owner>` or `NOVA_DEFAULT_GITHUB_OWNER` so the repo is created under the right account (e.g., `joinnova-ci`).
-3. Follow the prompts. The script provisions a temp venv, installs Nova, runs pytest, then shows Nova’s agent loop turning red tests green. The GitHub path also creates a throwaway repo, pushes the workflow, and streams a run link.
+## Prerequisites
+- macOS or Linux shell
+- `python3`, `pip`, `git`, `gh`
+- OpenAI API key (set `OPENAI_API_KEY` or store in `~/.nova.env`)
+- Cloudsmith entitlement token (set `CLOUDSMITH_ENTITLEMENT` or similar)
 
-Logs land in `/tmp/nova-quickstart-<timestamp>.log` with secrets scrubbed. Delete the temp dirs whenever you’re done.
+Optional but useful:
+- `coreutils` on macOS (`brew install coreutils`) to provide `timeout` for watching GitHub Actions runs.
 
-### Utility Flags
-- `--fresh` re-runs the quickstart in a temporary HOME so no saved credentials or gh logins bleed through.
-- `--reset-keys` wipes Nova’s stored OpenAI key from macOS Keychain and `~/.nova.env` (requires confirmation unless combined with `--yes`).
-- `--purge` removes previous `/tmp/nova-quickstart-*` and `nova-demo-*` workspaces.
-- `--no-keychain` forces the script to use dotfile storage only (skips Keychain).
-- `--yes` auto-confirms prompts, useful together with cleanup flags or CI runs.
+## Running demos
+```bash
+bash quickstart-cli.sh            # interactive menu
+bash quickstart-cli.sh --local    # direct local demo (calculator rescue)
+bash quickstart-cli.sh --github   # direct GitHub Actions demo
+```
 
+The script provisions a virtual environment, installs Nova, runs pytest, and shows Nova’s agent loop turning red tests green. In GitHub mode it pushes a throwaway repo, installs the workflow, sets secrets, and streams the Action run inline.
 
-## Non-Interactive Usage
-Want to run Nova outside the guided flow?
+Logs are scrubbed by default and saved as `/tmp/nova-quickstart-<timestamp>.log`. Use `--purge` to clean up `/tmp` afterwards if desired.
+
+## Useful flags
+| Flag | Description |
+| --- | --- |
+| `--fresh` | Re-run in a sandbox HOME (no saved keys, blank gh login); nothing persists. |
+| `--reset-keys` | Remove cached keys (Keychain + `~/.nova.env`). Use `--yes` to skip confirmation. |
+| `--purge` | Delete prior `/tmp/nova-*` demo workspaces. |
+| `--no-keychain` | Skip Keychain; use dotfile storage only. |
+| `--yes` | Assume “yes” for prompts (handy with reset/purge). |
+| `--use-existing OWNER/REPO` | Run GitHub demo against an existing empty repo you own. |
+| `--org <owner>` / `NOVA_DEFAULT_GITHUB_OWNER=<owner>` | Default owner/org for repo creation. |
+
+## Non-interactive Nova usage
 ```
 python3 -m venv .venv && source .venv/bin/activate
 pip install nova-ci-rescue pytest
 nova fix --ci "pytest -q"
 ```
-This triggers the same safety rails (≤40 LOC, ≤5 files, ≤3 attempts).
+This mirrors the demo: Nova plans, patches ≤40 LOC / ≤5 files, and re-runs tests until green or safety limits hit.
 
-## Contributing
-See `AGENTS.md` for style requirements, manual test expectations, and commit/PR etiquette. When adjusting the GitHub demo, always test with:
-```
-bash quickstart-cli.sh --local
-bash quickstart-cli.sh --github --org <owner>
-```
-Capture transcripts in `/tmp` for future debugging and leave the legacy artifacts in `archive/` untouched.
+## Contributing & validation
+1. Adjust code.
+2. Run both demos:
+   ```bash
+   bash quickstart-cli.sh --local
+   bash quickstart-cli.sh --github --yes  # requires gh auth login -w -s "repo,workflow"
+   ```
+3. Capture transcripts in `/tmp` for future debugging.
+4. See `AGENTS.md` for style and PR guidelines.
+
+Questions? Reach out at `sebastian@joinnova.com`.
