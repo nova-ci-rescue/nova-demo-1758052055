@@ -1931,6 +1931,7 @@ show_advanced_options() {
 
 create_local_demo_script() {
     cat > /tmp/nova_local_demo.sh << 'DEMO_SCRIPT'
+#!/usr/bin/env bash
 # Nova CI-Rescue Local Demo - Auto-generated
 
 set -e
@@ -2356,6 +2357,7 @@ create_github_demo_script() {
     # Copy the GitHub demo script content from the provided file
     # This is a simplified version
     cat > /tmp/nova_github_demo.sh << 'GITHUB_SCRIPT'
+#!/usr/bin/env bash
 set -e
 
 echo -e "\n🌐 Nova CI-Rescue - GitHub Actions Demo\n"
