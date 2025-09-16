@@ -94,6 +94,19 @@ ok()    { printf "%b%s%b %s\n"   "${UI_GREEN}" "${ICON_CHECK}" "${UI_RESET}" "$*
 warn()  { printf "%b%s%b %s\n"   "${UI_YELLOW}" "${ICON_WARN}"  "${UI_RESET}" "$*"; }
 note()  { printf "%b%s%b %s\n"   "${UI_GREY}"  "${ICON_DOT}"    "${UI_RESET}" "$*"; }
 
+watch_workflow_with_timeout() {
+  local run_id="$1"
+  local timeout_seconds="${2:-300}"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$timeout_seconds" gh run watch "$run_id"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$timeout_seconds" gh run watch "$run_id"
+  else
+    warn "'timeout' command not available; streaming logs until the run completes (Ctrl+C to stop)."
+    gh run watch "$run_id"
+  fi
+}
+
 spinner_run() {
   local msg="$1"; shift
   local frames i=0
@@ -854,7 +867,7 @@ show_demo_menu() {
         printf "%b\n" "  1) Local demo ${DIM}(2–3 min)${NC}   — See red → green on your machine" > /dev/tty 2>/dev/null || true
         printf "\n" > /dev/tty 2>/dev/null || true
         # GitHub Actions Demo Option (2)
-        printf "%b\n" "  2) GitHub Actions ${DIM}(5–7 min)${NC} — Watch a live CI rescue in a PR" > /dev/tty 2>/dev/null || true
+        printf "%b\n" "  2) GitHub Actions ${DIM}(5–7 min)${NC} — Watch a live CI rescue in a PR ${DIM}(requires gh auth login)${NC}" > /dev/tty 2>/dev/null || true
         printf "\n\n" > /dev/tty 2>/dev/null || true
         print_line > /dev/tty 2>/dev/null || true
         printf "\n" > /dev/tty 2>/dev/null || true
@@ -863,7 +876,7 @@ show_demo_menu() {
         echo
         echo -e "  1) Local demo ${DIM}(2–3 min)${NC}   — See red → green on your machine"
         echo
-        echo -e "  2) GitHub Actions ${DIM}(5–7 min)${NC} — Watch a live CI rescue in a PR"
+        echo -e "  2) GitHub Actions ${DIM}(5–7 min)${NC} — Watch a live CI rescue in a PR ${DIM}(requires gh auth login)${NC}"
         echo
         echo
         print_line
@@ -913,13 +926,19 @@ run_local_demo() {
 }
 
 run_github_demo() {
+    local prev_dir=$(pwd)
+    trap 'cd "$prev_dir"' RETURN
+
     header "Nova CI–Rescue – GitHub Quickstart" "See Nova fix failing tests in GitHub Actions"
     echo -e "${BOLD}Estimated time:${NC} ~5–7 minutes"
     echo
 
-    # Check GitHub CLI auth first
+    local TOTAL=8
+
+    step 1 $TOTAL "🔐" "Verify GitHub CLI access"
+    note "We use the GitHub CLI to create a throwaway demo repository."
     if ! command -v gh &>/dev/null; then
-        echo -e "${RED}✗ GitHub CLI (gh) is required for this demo${NC}"
+        warn "GitHub CLI (gh) is required for this demo"
         echo -e "${YELLOW}Install with:${NC}"
         echo -e "  ${DIM}brew install gh${NC}  (macOS)"
         echo -e "  ${DIM}sudo apt install gh${NC}  (Ubuntu)"
@@ -928,49 +947,75 @@ run_github_demo() {
         return 1
     fi
 
-    if ! gh auth status &>/dev/null; then
-        echo -e "${YELLOW}GitHub authentication required${NC}"
-        echo -e "${DIM}Running: gh auth login${NC}"
-        echo
-        gh auth login
+    local gh_scopes="" gh_identity=""
+    if gh auth status &>/dev/null; then
+        gh_scopes=$(gh auth status -t 2>/dev/null | sed -n 's/.*Token scopes: //p') || gh_scopes=""
+        if [ -n "$gh_scopes" ]; then
+            note "Reusing existing GitHub CLI session (scopes: $gh_scopes)"
+        else
+            note "Reusing existing GitHub CLI session."
+        fi
+    else
+        if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
+            note "No gh login found, but GH_TOKEN detected – continuing with token auth."
+        elif [ -t 0 ]; then
+            warn "GitHub authentication required"
+            echo -e "${DIM}Running: gh auth login -s \"repo,workflow\"${NC}"
+            echo
+            gh auth login -s "repo,workflow"
+        else
+            echo -e "${RED}✗ GitHub CLI not authenticated${NC}"
+            echo "Set GH_TOKEN / GITHUB_TOKEN or run 'gh auth login -s \"repo,workflow\"' before retrying."
+            return 1
+        fi
     fi
 
-    # Credentials are already set in main()
-    # Just ensure they're available in this function
+    if ! gh auth status &>/dev/null; then
+        echo -e "${RED}✗ GitHub authentication failed${NC}"
+        echo "Run: gh auth login -s \"repo,workflow\""
+        return 1
+    fi
+
+    gh_identity=$(gh api user --jq .login 2>/dev/null || gh auth status 2>&1 | awk '/Logged in to github.com as/ {print $7}' || true)
+    if [ -n "$gh_identity" ]; then
+        ok "GitHub CLI authenticated as $gh_identity"
+    else
+        ok "GitHub CLI authenticated"
+    fi
+    if [ -n "$gh_scopes" ]; then
+        note "Token scopes: $gh_scopes"
+    fi
+    echo
+
     if [ -z "${OPENAI_API_KEY:-}" ]; then
         echo -e "${RED}✗ OpenAI API key not found${NC}"
         echo "This should have been set earlier in the script."
         return 1
     fi
 
-    TOTAL=7
-
-    step 1 $TOTAL "$ICON_BOX" "Create isolated workspace"
+    step 2 $TOTAL "$ICON_BOX" "Create isolated workspace"
     WORKSPACE="/tmp/nova-quickstart-$(date +%Y%m%d-%H%M%S)"
     echo "✓ Workspace: $WORKSPACE"
     mkdir -p "$WORKSPACE"
     cd "$WORKSPACE"
 
-    step 2 $TOTAL "$ICON_ROCKET" "Install Nova CI‑Rescue"
+    step 3 $TOTAL "$ICON_ROCKET" "Install Nova CI‑Rescue"
     python3 -m venv .venv
     source .venv/bin/activate
     export PIP_DISABLE_PIP_VERSION_CHECK=1
 
-    # Install Nova with robust fallbacks (inspired by the patch)
     INSTALL_ARGS=(nova-ci-rescue pytest requests openai)
     INSTALL_SUCCESS=0
 
-    # Clean up any existing nova shims to avoid conflicts
     rm -f ~/.pyenv/shims/nova 2>/dev/null || true
     rm -f ~/Library/Python/*/bin/nova 2>/dev/null || true
     rm -f ~/.local/bin/nova 2>/dev/null || true
 
     python3 -m pip install --upgrade pip >/dev/null 2>&1
 
-    if [ -n "${CLOUDSMITH_ENTITLEMENT}" ]; then
+    if [ -n "${CLOUDSMITH_ENTITLEMENT:-}" ]; then
         CLOUDSMITH_URL="https://dl.cloudsmith.io/${CLOUDSMITH_ENTITLEMENT}/nova/nova-ci-rescue/python/simple/"
         echo "Trying Cloudsmith installation..."
-
         set +e
         python3 -m pip install -U --no-cache-dir --force-reinstall \
             "${INSTALL_ARGS[@]}" \
@@ -979,8 +1024,7 @@ run_github_demo() {
             --quiet >/dev/null 2>&1
         INSTALL_STATUS=$?
         set -e
-
-        if [ ${INSTALL_STATUS} -eq 0 ]; then
+        if [ $INSTALL_STATUS -eq 0 ]; then
             INSTALL_SUCCESS=1
             echo "✓ Installed from Cloudsmith"
         else
@@ -996,21 +1040,17 @@ run_github_demo() {
             --quiet >/dev/null 2>&1
         INSTALL_STATUS=$?
         set -e
-
-        if [ ${INSTALL_STATUS} -eq 0 ]; then
+        if [ $INSTALL_STATUS -eq 0 ]; then
             INSTALL_SUCCESS=1
             echo "✓ Installed from PyPI"
         else
             echo "⚠️  PyPI install failed; trying underscore variant..."
-
-            # Try underscore variant as fallback
             set +e
             python3 -m pip install -U --no-cache-dir --force-reinstall nova_ci_rescue \
                 --quiet >/dev/null 2>&1
             INSTALL_STATUS=$?
             set -e
-
-            if [ ${INSTALL_STATUS} -eq 0 ]; then
+            if [ $INSTALL_STATUS -eq 0 ]; then
                 INSTALL_SUCCESS=1
                 echo "✓ Installed underscore variant from PyPI"
             fi
@@ -1027,7 +1067,6 @@ run_github_demo() {
         return 1
     fi
 
-    # Verify installation
     if command -v nova >/dev/null 2>&1; then
         NOVA_VERSION=$(nova --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "latest")
         echo "✓ Nova ${NOVA_VERSION} installed successfully"
@@ -1036,10 +1075,9 @@ run_github_demo() {
         return 1
     fi
 
-    step 3 $TOTAL "🧪" "Generate demo repo (failing tests)"
+    step 4 $TOTAL "🧪" "Generate demo repo (failing tests)"
 
-    # Create demo repo with failing calculator
-    cat > calculator.py << 'EOF'
+    cat > calculator.py <<'EOF'
 def add(a, b):
     return a - b
 
@@ -1050,7 +1088,7 @@ def power(a, b):
     return a * b
 EOF
 
-    cat > test_calculator.py << 'EOF'
+    cat > test_calculator.py <<'EOF'
 from calculator import add, multiply, power
 
 def test_add():
@@ -1063,54 +1101,50 @@ def test_power():
     assert power(2, 3) == 8
 EOF
 
-    # Initialize git repo
     git init -q
     git config user.email "demo@nova.ai"
     git config user.name "Nova Demo"
 
-    # Create GitHub repo
     REPO_NAME="nova-demo-$(date +%s)"
     echo "Creating GitHub repository: $REPO_NAME"
 
-    # Try to get the current user/org that can create repos
     GITHUB_USER=""
     if gh auth status >/dev/null 2>&1; then
-        # Try to determine if we should create under user or org
         GITHUB_USER=$(gh api user --jq .login 2>/dev/null || echo "")
         if [ -z "$GITHUB_USER" ]; then
-            # Fallback: try to extract from auth status
             GITHUB_USER=$(gh auth status 2>&1 | grep -oE 'account [^[:space:]]+' | cut -d' ' -f2 || echo "")
         fi
     fi
 
     if [ -z "$GITHUB_USER" ]; then
         echo -e "${RED}✗ Could not determine GitHub user/organization${NC}"
-        echo "Please ensure you're logged in with: gh auth login"
+        echo "Please ensure you're logged in with: gh auth login -s \"repo,workflow\""
         return 1
+    fi
+    if [ -n "${NOVA_DEFAULT_GITHUB_OWNER:-}" ]; then
+        GITHUB_USER="$NOVA_DEFAULT_GITHUB_OWNER"
+        note "Overriding GitHub owner with NOVA_DEFAULT_GITHUB_OWNER=$NOVA_DEFAULT_GITHUB_OWNER"
     fi
 
     echo "Creating repository as: $GITHUB_USER/$REPO_NAME"
 
-    # Try creating repo, with better error handling
-    if ! gh repo create "$REPO_NAME" --public --description "Nova CI-Rescue Demo" --clone=false 2>/tmp/gh_error; then
+    if ! gh repo create "$GITHUB_USER/$REPO_NAME" --public --description "Nova CI-Rescue Demo" --clone=false --confirm >/tmp/gh_error 2>&1; then
         echo -e "${RED}✗ Failed to create GitHub repository${NC}"
-        echo "Error details:"
         cat /tmp/gh_error
         echo
         echo "Possible solutions:"
         echo "1. Make sure you have repository creation permissions"
-        echo "2. Try logging in as a user account: gh auth login"
+        echo "2. Try logging in as a user account: gh auth login -s \"repo,workflow\""
         echo "3. If using an organization, ensure you have proper permissions"
         return 1
     fi
 
     git remote add origin "https://github.com/${GITHUB_USER}/$REPO_NAME.git"
 
-    step 4 $TOTAL "🏗️" "Provision GitHub Actions workflow"
+    step 5 $TOTAL "🏗️" "Provision GitHub Actions workflow"
 
-    # Create workflow that will use Nova
     mkdir -p .github/workflows
-    cat > .github/workflows/ci.yml << 'YAML'
+    cat > .github/workflows/ci.yml <<'YAML'
 name: CI with Nova Auto-Fix
 
 on:
@@ -1135,11 +1169,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.x'
+          cache: pip
 
       - name: Install dependencies
         run: |
-          python -m pip install -U pip
+          python -m pip install --upgrade pip
           python -m pip install pytest
 
       - name: Run tests (initial)
@@ -1173,25 +1208,25 @@ YAML
     git commit -m "Initial commit: failing calculator with Nova CI workflow"
     echo "✓ GitHub Actions workflow created"
 
-    step 5 $TOTAL "🔎" "Run first CI (expected to fail)"
+    step 6 $TOTAL "🔎" "Run first CI (expected to fail)"
 
-    # Push and trigger first CI run
     git push -u origin main
 
-    # Set the OpenAI API key as a GitHub secret
     echo "Setting OpenAI API key as GitHub secret..."
-    echo "$OPENAI_API_KEY" | gh secret set OPENAI_API_KEY
+    if ! gh secret set OPENAI_API_KEY --repo "$GITHUB_USER/$REPO_NAME" --body "$OPENAI_API_KEY" >/tmp/gh_secret.log 2>&1; then
+        warn "Failed to store OPENAI_API_KEY automatically; add it manually with gh secret set OPENAI_API_KEY --repo $GITHUB_USER/$REPO_NAME"
+        cat /tmp/gh_secret.log
+    else
+        echo "✓ OpenAI API key configured as GitHub secret"
+    fi
 
     echo "✓ Repository pushed, CI will run shortly"
-    echo "✓ OpenAI API key configured as GitHub secret"
 
-    step 6 $TOTAL "🤖" "Nova auto‑fix in CI"
+    step 7 $TOTAL "🤖" "Nova auto‑fix in CI"
 
-    # Wait a moment for CI to start
     echo "Waiting for CI to start..."
     sleep 10
 
-    # Monitor the workflow run
     echo "Monitoring workflow run..."
     RUN_ID=$(gh run list --limit 1 --json databaseId --jq '.[0].databaseId')
 
@@ -1199,15 +1234,14 @@ YAML
         echo "Workflow run ID: $RUN_ID"
         echo "You can watch the progress at:"
         echo "https://github.com/${GITHUB_USER}/$REPO_NAME/actions/runs/$RUN_ID"
-
-        # Wait for the run to complete (with timeout)
         echo "Waiting for workflow to complete (up to 5 minutes)..."
-        timeout 300 gh run watch "$RUN_ID" || true
+        watch_workflow_with_timeout "$RUN_ID" 300 || true
+    else
+        warn "No workflow run detected yet; check the Actions tab manually."
     fi
 
-    step 7 $TOTAL "✅" "Verify green build and summarize"
+    step 8 $TOTAL "✅" "Verify green build and summarize"
 
-    # Check final status
     FINAL_STATUS=$(gh run list --limit 1 --json conclusion --jq '.[0].conclusion')
 
     echo
@@ -1218,25 +1252,33 @@ YAML
         echo "Check the workflow logs for details"
     fi
 
-    # Show repository URL
     REPO_URL="https://github.com/${GITHUB_USER}/$REPO_NAME"
     echo
     echo -e "${BOLD}Demo Repository:${NC} $REPO_URL"
     echo -e "${BOLD}Actions:${NC} $REPO_URL/actions"
 
-    # Offer to open in browser
-    if command -v open >/dev/null 2>&1 && [ -z "${NO_BROWSER:-}" ]; then
-        echo
-        read -p "Open repository in browser? [Y/n] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-            open "$REPO_URL"
+    if [ -z "${NO_BROWSER:-}" ]; then
+        if command -v open >/dev/null 2>&1; then
+            echo
+            read -p "Open repository in browser? [Y/n] " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                open "$REPO_URL"
+            fi
+        elif command -v xdg-open >/dev/null 2>&1; then
+            echo
+            read -p "Open repository in browser? [Y/n] " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                xdg-open "$REPO_URL" >/dev/null 2>&1 || true
+            fi
         fi
     fi
 
     echo
     echo -e "${GREEN}✓ GitHub Actions demo complete!${NC}"
 }
+
 
 run_rescue_campaign() {
     echo
