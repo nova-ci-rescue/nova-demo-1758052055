@@ -18,6 +18,14 @@ This repo packages the interactive CLI experience we use to demo Nova fixing fai
 
 Logs land in `/tmp/nova-quickstart-<timestamp>.log` with secrets scrubbed. Delete the temp dirs whenever you’re done.
 
+### Utility Flags
+- `--fresh` re-runs the quickstart in a temporary HOME so no saved credentials or gh logins bleed through.
+- `--reset-keys` wipes Nova’s stored OpenAI key from macOS Keychain and `~/.nova.env` (requires confirmation unless combined with `--yes`).
+- `--purge` removes previous `/tmp/nova-quickstart-*` and `nova-demo-*` workspaces.
+- `--no-keychain` forces the script to use dotfile storage only (skips Keychain).
+- `--yes` auto-confirms prompts, useful together with cleanup flags or CI runs.
+
+
 ## Non-Interactive Usage
 Want to run Nova outside the guided flow?
 ```

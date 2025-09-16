@@ -1,0 +1,57 @@
+name: CI with Nova Auto-Fix
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Run tests (initial)
+        id: pytest_initial
+        continue-on-error: true
+        run: |
+          pytest -v
+          echo "passed=$([[ $? -eq 0 ]] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      - name: Install Nova CI-Rescue
+        if: steps.pytest_initial.outputs.passed == 'false'
+        run: |
+          python -m pip install -U --no-cache-dir nova-ci-rescue \
+            --index-url "https://dl.cloudsmith.io/uvm95DprtlQod6Cy/nova/nova-ci-rescue/python/simple/" \
+            --extra-index-url "https://pypi.org/simple"
+
+      - name: Nova auto-fix
+        if: steps.pytest_initial.outputs.passed == 'false'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          nova fix --quiet --max-iters 3
+
+      - name: Run tests (after fix)
+        if: steps.pytest_initial.outputs.passed == 'false'
+        run: |
+          pytest -v

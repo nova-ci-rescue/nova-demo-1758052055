@@ -7,6 +7,8 @@
 
 set -euo pipefail
 
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
 # ---------------------------------------------------------------------------------
 # TEMP: Optional hardcoded credentials for first-run convenience (LOCAL ONLY)
 # Replace the placeholder strings below with your actual keys to bypass prompts.
@@ -58,6 +60,104 @@ fi
 
 # -------------------------
 # Minimal CLI UI primitives
+if [ "${NOVA_ASSUME_YES:-}" = "1" ]; then
+    ASSUME_YES=1
+else
+    ASSUME_YES=0
+fi
+FRESH_MODE=0
+RESET_KEYS=0
+PURGE_TEMP=0
+NO_KEYCHAIN_FLAG=0
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+confirm() {
+  local prompt="${1:-Are you sure?}"
+  if [ "$ASSUME_YES" = "1" ]; then
+    return 0
+  fi
+  if [ ! -t 0 ]; then
+    return 1
+  fi
+  local reply=""
+  if [ -e /dev/tty ]; then
+    printf "%s [Y/n] " "$prompt" > /dev/tty 2>/dev/null || true
+    IFS= read -r reply < /dev/tty || reply=""
+    printf "\n" > /dev/tty 2>/dev/null || true
+  else
+    read -r -p "$prompt [Y/n] " reply || reply=""
+  fi
+  [ -z "$reply" ] && return 0
+  [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+reset_saved_keys() {
+  local removed=0
+  if [ -f "$HOME/.nova.env" ]; then
+    if confirm "Delete $HOME/.nova.env?"; then
+      if rm -f "$HOME/.nova.env" 2>/dev/null; then
+        echo "✓ Removed $HOME/.nova.env"
+        removed=1
+      else
+        warn "Unable to remove $HOME/.nova.env (permission denied)"
+      fi
+    fi
+  fi
+  if [ "$(uname)" = "Darwin" ] && have_cmd security; then
+    if confirm "Remove Nova OpenAI key from macOS Keychain?"; then
+      security delete-generic-password -s "Nova:OPENAI_API_KEY" >/dev/null 2>&1 || true
+      security delete-generic-password -s nova_openai_api_key >/dev/null 2>&1 || true
+      echo "✓ Removed Keychain entry"
+      removed=1
+    fi
+  fi
+  if [ "$removed" -eq 0 ]; then
+    echo "ℹ️  No stored keys were removed."
+  fi
+}
+
+purge_temp_workspaces() {
+  local tmp=${TMPDIR:-/tmp}
+  local patterns=("nova-quickstart-*" "nova-demo-*")
+  local removed=0
+  for pattern in "${patterns[@]}"; do
+    for dir in "$tmp"/$pattern; do
+      [ -e "$dir" ] || continue
+      if confirm "Remove $dir?"; then
+        rm -rf "$dir"
+        echo "✓ Removed $dir"
+        removed=1
+      fi
+    done
+  done
+  if [ "$removed" -eq 0 ]; then
+    echo "ℹ️  No existing Nova workspaces found in $tmp"
+  fi
+}
+
+reexec_fresh_env() {
+  if [ "${NOVA_FRESH_REEXEC:-0}" = "1" ]; then
+    export NOVA_CRED_BACKEND=none
+    export NOVA_CRED_ASK_REMEMBER=0
+    return
+  fi
+  local fresh_home
+  fresh_home=$(mktemp -d "${TMPDIR:-/tmp}/nova-fresh-home-XXXXXX")
+  echo "🧪 Fresh mode: re-exec with HOME=$fresh_home"
+  export NOVA_FRESH_REEXEC=1
+  export NOVA_ASSUME_YES="$ASSUME_YES"
+  export HOME="$fresh_home"
+  export XDG_CONFIG_HOME="$HOME/.config"
+  export GH_CONFIG_DIR="$HOME/.config/gh"
+  export GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
+  export PIP_CACHE_DIR="$HOME/.cache/pip"
+  unset OPENAI_API_KEY ANTHROPIC_API_KEY
+  export NOVA_CRED_BACKEND=none
+  export NOVA_CRED_ASK_REMEMBER=0
+  exec /bin/bash "$SCRIPT_PATH" "$@"
+}
+
 # -------------------------
 _ui_color() { tput setaf "$1" 2>/dev/null || true; }
 _ui_reset() { tput sgr0 2>/dev/null || true; }
@@ -187,6 +287,61 @@ setup_logging() {
 ORIGINAL_VENV="${VIRTUAL_ENV:-}"
 
 # Terminal capabilities detection
+ORIGINAL_ARGS=("$@")
+PARSED_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fresh)
+      FRESH_MODE=1
+      shift
+      ;;
+    --reset-keys)
+      RESET_KEYS=1
+      shift
+      ;;
+    --purge)
+      PURGE_TEMP=1
+      shift
+      ;;
+    --no-keychain)
+      NO_KEYCHAIN_FLAG=1
+      shift
+      ;;
+    --yes|-y)
+      ASSUME_YES=1
+      shift
+      ;;
+    --)
+      shift
+      while [ $# -gt 0 ]; do
+        PARSED_ARGS+=("$1")
+        shift
+      done
+      break
+      ;;
+    *)
+      PARSED_ARGS+=("$1")
+      shift
+      ;;
+  esac
+  [ $# -eq 0 ] && break
+done
+
+set -- "${PARSED_ARGS[@]}"
+
+if [ "$NO_KEYCHAIN_FLAG" = "1" ]; then
+  export NOVA_CRED_BACKEND="envfile"
+fi
+if [ "$RESET_KEYS" = "1" ]; then
+  reset_saved_keys
+fi
+if [ "$PURGE_TEMP" = "1" ]; then
+  purge_temp_workspaces
+fi
+if [ "$FRESH_MODE" = "1" ]; then
+  reexec_fresh_env "$@"
+fi
+
 if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
     COLS=$(tput cols 2>/dev/null || echo 80)
     LINES=$(tput lines 2>/dev/null || echo 24)
@@ -1139,7 +1294,11 @@ EOF
         return 1
     fi
 
-    git remote add origin "https://github.com/${GITHUB_USER}/$REPO_NAME.git"
+    if git remote get-url origin >/dev/null 2>&1; then
+        git remote set-url origin "https://github.com/${GITHUB_USER}/$REPO_NAME.git"
+    else
+        git remote add origin "https://github.com/${GITHUB_USER}/$REPO_NAME.git"
+    fi
 
     step 5 $TOTAL "🏗️" "Provision GitHub Actions workflow"
 
@@ -2181,6 +2340,11 @@ case "${1:-}" in
         echo "  --ci          Generate GitHub Actions workflow in current repo"
         echo "  --local       Run local demo directly"
         echo "  --github      Run GitHub Actions demo directly"
+        echo "  --fresh       Re-run in a clean sandbox (no saved keys, blank HOME)"
+        echo "  --reset-keys  Remove cached OpenAI keys (Keychain + ~/.nova.env)"
+        echo "  --purge       Delete previous demo workspaces under /tmp"
+        echo "  --no-keychain Avoid storing or reading secrets from the system keychain"
+        echo "  --yes         Assume 'yes' for prompts (used with cleanup flags)"
         echo "  --campaign    Start 100 PR Rescue campaign mode"
         echo "  --verbose     Show detailed output"
         echo "  --no-color    Disable ANSI colors in output"
